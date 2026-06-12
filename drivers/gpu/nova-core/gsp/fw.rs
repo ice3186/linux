@@ -173,7 +173,6 @@ impl GspFwWprMeta {
         gsp_firmware: &'a GspFirmware,
         fb_layout: &'a FbLayout,
     ) -> impl Init<Self> + 'a {
-        #[allow(non_snake_case)]
         let init_inner = init!(bindings::GspFwWprMeta {
             // CAST: we want to store the bits of `GSP_FW_WPR_META_MAGIC` unmodified.
             magic: bindings::GSP_FW_WPR_META_MAGIC as u64,
@@ -628,7 +627,6 @@ impl LibosMemoryRegionInitArgument {
             u64::from_ne_bytes(bytes)
         }
 
-        #[allow(non_snake_case)]
         let init_inner = init!(bindings::LibosMemoryRegionInitArgument {
             id8: id8(name),
             pa: obj.dma_handle(),
@@ -767,7 +765,6 @@ impl GspMsgElement {
     /// * `sequence` - Sequence number of the message.
     /// * `cmd_size` - Size of the command (not including the message element), in bytes.
     /// * `function` - Function of the message.
-    #[allow(non_snake_case)]
     pub(crate) fn init(
         sequence: u32,
         cmd_size: usize,
@@ -850,7 +847,6 @@ pub(crate) struct GspArgumentsCached {
 impl GspArgumentsCached {
     /// Creates the arguments for starting the GSP up using `cmdq` as its command queue.
     pub(crate) fn new(cmdq: &Cmdq) -> impl Init<Self> + '_ {
-        #[allow(non_snake_case)]
         let init_inner = init!(bindings::GSP_ARGUMENTS_CACHED {
             messageQueueInitArguments <- MessageQueueInitArguments::new(cmdq),
             bDmemStack: 1,
@@ -897,7 +893,6 @@ type MessageQueueInitArguments = bindings::MESSAGE_QUEUE_INIT_ARGUMENTS;
 
 impl MessageQueueInitArguments {
     /// Creates a new init arguments structure for `cmdq`.
-    #[allow(non_snake_case)]
     fn new(cmdq: &Cmdq) -> impl Init<Self> + '_ {
         init!(MessageQueueInitArguments {
             sharedMemPhysAddr: cmdq.dma_handle,
@@ -921,7 +916,6 @@ type GspAcrBootGspRmParams = bindings::GSP_ACR_BOOT_GSP_RM_PARAMS;
 
 impl GspAcrBootGspRmParams {
     fn new(target: GspDmaTarget, wpr_meta_addr: u64) -> impl Init<Self> {
-        #[allow(non_snake_case)]
         let params = init!(Self {
             target: target as u32,
             gspRmDescSize: num::usize_into_u32::<{ size_of::<GspFwWprMeta>() }>(),
@@ -940,7 +934,6 @@ type GspRmParams = bindings::GSP_RM_PARAMS;
 
 impl GspRmParams {
     fn new(target: GspDmaTarget, libos_addr: u64) -> impl Init<Self> {
-        #[allow(non_snake_case)]
         let params = init!(Self {
             target: target as u32,
             bootArgsOffset: libos_addr,
@@ -960,7 +953,6 @@ unsafe impl FromBytes for GspFmcBootParams {}
 
 impl GspFmcBootParams {
     pub(crate) fn new(wpr_meta_addr: u64, libos_addr: u64) -> impl Init<Self> {
-        #[allow(non_snake_case)]
         let init = init!(Self {
             // Blackwell FSP obtains WPR info from other sources, so
             // wprCarveoutOffset and wprCarveoutSize are left zero.
