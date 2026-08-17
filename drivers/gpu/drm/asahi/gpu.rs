@@ -43,7 +43,6 @@ use kernel::{
         UniqueArc, //
     },
     time::{
-        msecs_to_jiffies,
         Delta,
         Instant,
         Monotonic, //
