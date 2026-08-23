@@ -3,7 +3,7 @@
 use super::*;
 
 /// The actual data that gets threaded through the callbacks.
-struct SmData<'a, 'ctx, T: DriverGpuVm> {
+struct SmData<'a, 'ctx, T: DriverGpuVm + 'ctx> {
     gpuvm: &'a mut UniqueRefGpuVm<T>,
     user_context: &'a mut T::SmContext<'ctx>,
 }
@@ -20,7 +20,7 @@ struct SmMapData<'a, 'ctx, T: DriverGpuVm> {
 }
 
 /// The argument for [`UniqueRefGpuVm::sm_map`].
-pub struct OpMapRequest<'a, 'ctx, T: DriverGpuVm> {
+pub struct OpMapRequest<'a, 'ctx, T: DriverGpuVm + 'ctx> {
     /// Address in GPU virtual address space.
     pub addr: u64,
     /// Length of mapping to create.
@@ -44,7 +44,9 @@ impl<'a, 'ctx, T: DriverGpuVm> OpMapRequest<'a, 'ctx, T> {
                 gem: bindings::drm_gpuva_op_map__bindgen_ty_2 {
                     offset: self.gem_offset,
                     obj: self.vm_bo.obj().as_raw(),
+                    range: 0, // FIXME
                 },
+                flags: 0,
             },
         }
     }
