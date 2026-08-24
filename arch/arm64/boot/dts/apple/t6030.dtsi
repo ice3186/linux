@@ -1437,8 +1437,7 @@
 				reg = <0xa80000 0x4000>;
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 1126 IRQ_TYPE_LEVEL_HIGH>;
-				#iommu-cells = <1>;
-				apple,dma-range = <0x100 0x0 0x10 0x0>;
+				#iommu-cells = <5>;
 			};
 
 			usb4_0_nhi: nhi@f00000 {
@@ -1481,30 +1480,30 @@
 					"rxring3", "rxring4", "rxring5",
 					"rxring6", "rxring7", "rxring8",
 					"rxring9", "rxring10", "rxring11";
-				iommus = <&usb4_0_dart 0>,
-					<&usb4_0_dart 1>,
-					<&usb4_0_dart 2>,
-					<&usb4_0_dart 3>,
-					<&usb4_0_dart 4>,
-					<&usb4_0_dart 5>,
-					<&usb4_0_dart 6>,
-					<&usb4_0_dart 7>,
-					<&usb4_0_dart 8>,
-					<&usb4_0_dart 9>,
-					<&usb4_0_dart 10>,
-					<&usb4_0_dart 11>,
-					<&usb4_0_dart 16>,
-					<&usb4_0_dart 17>,
-					<&usb4_0_dart 18>,
-					<&usb4_0_dart 19>,
-					<&usb4_0_dart 20>,
-					<&usb4_0_dart 21>,
-					<&usb4_0_dart 22>,
-					<&usb4_0_dart 23>,
-					<&usb4_0_dart 24>,
-					<&usb4_0_dart 25>,
-					<&usb4_0_dart 26>,
-					<&usb4_0_dart 27>;
+				iommus = <&usb4_0_dart 0 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 1 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 2 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 3 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 4 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 5 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 6 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 7 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 8 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 9 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 10 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 11 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 16 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 17 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 18 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 19 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 20 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 21 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 22 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 23 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 24 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 25 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 26 0x100 0x0 0x10 0x0>,
+					<&usb4_0_dart 27 0x100 0x0 0x10 0x0>;
 				/* To be filled by the loader */
 				apple,thunderbolt-drom = [00];
 			};
@@ -1605,8 +1604,7 @@
 				reg = <0xa80000 0x4000>;
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 1184 IRQ_TYPE_LEVEL_HIGH>;
-				#iommu-cells = <1>;
-				apple,dma-range = <0x100 0x0 0x10 0x0>;
+				#iommu-cells = <5>;
 			};
 
 			usb4_1_nhi: nhi@f00000 {
@@ -1649,30 +1647,30 @@
 					"rxring3", "rxring4", "rxring5",
 					"rxring6", "rxring7", "rxring8",
 					"rxring9", "rxring10", "rxring11";
-				iommus = <&usb4_1_dart 0>,
-					<&usb4_1_dart 1>,
-					<&usb4_1_dart 2>,
-					<&usb4_1_dart 3>,
-					<&usb4_1_dart 4>,
-					<&usb4_1_dart 5>,
-					<&usb4_1_dart 6>,
-					<&usb4_1_dart 7>,
-					<&usb4_1_dart 8>,
-					<&usb4_1_dart 9>,
-					<&usb4_1_dart 10>,
-					<&usb4_1_dart 11>,
-					<&usb4_1_dart 16>,
-					<&usb4_1_dart 17>,
-					<&usb4_1_dart 18>,
-					<&usb4_1_dart 19>,
-					<&usb4_1_dart 20>,
-					<&usb4_1_dart 21>,
-					<&usb4_1_dart 22>,
-					<&usb4_1_dart 23>,
-					<&usb4_1_dart 24>,
-					<&usb4_1_dart 25>,
-					<&usb4_1_dart 26>,
-					<&usb4_1_dart 27>;
+				iommus = <&usb4_1_dart 0 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 1 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 2 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 3 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 4 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 5 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 6 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 7 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 8 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 9 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 10 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 11 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 16 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 17 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 18 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 19 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 20 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 21 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 22 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 23 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 24 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 25 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 26 0x100 0x0 0x10 0x0>,
+					<&usb4_1_dart 27 0x100 0x0 0x10 0x0>;
 				/* To be filled by the loader */
 				apple,thunderbolt-drom = [00];
 			};
@@ -1773,8 +1771,7 @@
 				reg = <0xa80000 0x4000>;
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 1242 IRQ_TYPE_LEVEL_HIGH>;
-				#iommu-cells = <1>;
-				apple,dma-range = <0x100 0x0 0x10 0x0>;
+				#iommu-cells = <5>;
 			};
 
 			usb4_2_nhi: nhi@f00000 {
@@ -1817,30 +1814,30 @@
 					"rxring3", "rxring4", "rxring5",
 					"rxring6", "rxring7", "rxring8",
 					"rxring9", "rxring10", "rxring11";
-				iommus = <&usb4_2_dart 0>,
-					<&usb4_2_dart 1>,
-					<&usb4_2_dart 2>,
-					<&usb4_2_dart 3>,
-					<&usb4_2_dart 4>,
-					<&usb4_2_dart 5>,
-					<&usb4_2_dart 6>,
-					<&usb4_2_dart 7>,
-					<&usb4_2_dart 8>,
-					<&usb4_2_dart 9>,
-					<&usb4_2_dart 10>,
-					<&usb4_2_dart 11>,
-					<&usb4_2_dart 16>,
-					<&usb4_2_dart 17>,
-					<&usb4_2_dart 18>,
-					<&usb4_2_dart 19>,
-					<&usb4_2_dart 20>,
-					<&usb4_2_dart 21>,
-					<&usb4_2_dart 22>,
-					<&usb4_2_dart 23>,
-					<&usb4_2_dart 24>,
-					<&usb4_2_dart 25>,
-					<&usb4_2_dart 26>,
-					<&usb4_2_dart 27>;
+				iommus = <&usb4_2_dart 0 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 1 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 2 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 3 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 4 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 5 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 6 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 7 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 8 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 9 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 10 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 11 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 16 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 17 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 18 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 19 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 20 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 21 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 22 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 23 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 24 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 25 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 26 0x100 0x0 0x10 0x0>,
+					<&usb4_2_dart 27 0x100 0x0 0x10 0x0>;
 				/* To be filled by the loader */
 				apple,thunderbolt-drom = [00];
 			};
