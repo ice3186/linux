@@ -865,10 +865,33 @@ static const struct of_device_id apple_acio_match[] = {
 };
 MODULE_DEVICE_TABLE(of, apple_acio_match);
 
+
+
+static int __maybe_unused apple_acio_suspend(struct device *dev)
+{
+	struct apple_cio *acio = dev_get_drvdata(dev);
+
+	guard(mutex)(&acio->lock);
+
+	if (acio->target_cable_info)
+		return -EBUSY;
+	else
+		return 0;
+}
+
+static int __maybe_unused apple_acio_resume(struct device *dev)
+{
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(apple_acio_pm_ops, apple_acio_suspend,
+				apple_acio_resume);
+
 static struct platform_driver apple_cio_driver = {
 	.driver = {
 		.name = "thunderbolt-apple-acio",
 		.of_match_table = apple_acio_match,
+		.pm = pm_sleep_ptr(&apple_acio_pm_ops),
 	},
 	.probe = apple_cio_probe,
 	.remove = apple_cio_remove,
