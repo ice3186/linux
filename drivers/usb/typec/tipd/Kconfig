@@ -8,9 +8,14 @@ config TYPEC_TPS6598X
 	depends on I2C
 	select REGMAP_I2C
 	select TYPEC_TPS6598X_CORE
+	imply TYPEC_DP_ALTMODE
 	help
 	  Say Y or M here if your system has TI TPS65982 or TPS65983 USB Power
 	  Delivery controller.
+
+	  Apple CD321x controllers (TPS6598x derivatives) negotiate DisplayPort
+	  Alternate Mode in firmware. Enable TYPEC_DP_ALTMODE so this driver can
+	  forward HPD to DRM through the Type-C DisplayPort altmode class.
 
 	  If you choose to build this driver as a dynamically linked module, the
 	  module will be called tps6598x.ko.
@@ -19,10 +24,14 @@ config TYPEC_SN201202X
 	tristate "TI SN201202x USB Power Delivery controller support"
 	depends on SPMI
 	select TYPEC_TPS6598X_CORE
+	imply TYPEC_DP_ALTMODE
 	help
 	  Say Y here to enable support for SN201202x, a TPS6598x variant
 	  that uses SPMI as a host bus, and is found on Apple devices starting
 	  from the M3 series.
+
+	  Enable TYPEC_DP_ALTMODE so firmware-managed DisplayPort Alternate
+	  Mode hotplug is reported through the Type-C DisplayPort altmode class.
 
 	  If you choose to build this driver as a dynamically linked module, the
 	  module will be called sn201202x.ko.

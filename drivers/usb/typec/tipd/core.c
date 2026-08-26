@@ -8,6 +8,7 @@
 
 #include <linux/i2c.h>
 #include <linux/acpi.h>
+#include <linux/compiler.h>
 #include <linux/gpio/consumer.h>
 #include <linux/of.h>
 #include <linux/power_supply.h>
@@ -17,6 +18,7 @@
 #include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_mux.h>
 #include <linux/usb/typec_tbt.h>
+#include <linux/usb/pd_vdo.h>
 #include <linux/usb/role.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
@@ -662,6 +664,232 @@ static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status 
 	cd321x->state.data = NULL;
 }
 
+/*
+ * Apple CD321x firmware negotiates DisplayPort Alternate Mode without OS
+ * involvement. typec-displayport still has to run Enter/Status/Configure so it
+ * can call drm_connector_oob_hotplug_event(); ACK those VDMs locally, the same
+ * way UCSI does when the PPM owns the mode.
+ */
+#define CD321X_DP_PIN_ASSIGN \
+	(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D) | BIT(DP_PIN_ASSIGN_E))
+
+static void cd321x_dp_vdm_work(struct work_struct *work)
+{
+	struct cd321x *cd321x = container_of(work, struct cd321x, dp_vdm_work);
+	int ret;
+
+	if (!READ_ONCE(cd321x->dp_partner_available))
+		return;
+
+	ret = typec_altmode_vdm(cd321x->port_altmode_dp, cd321x->dp_header,
+				cd321x->dp_vdo_data, cd321x->dp_vdo_size);
+	if (ret)
+		dev_err(cd321x->tps.dev, "DP VDM 0x%x failed: %d\n",
+			cd321x->dp_header, ret);
+
+	cd321x->dp_vdo_data = NULL;
+	cd321x->dp_vdo_size = 0;
+	cd321x->dp_header = 0;
+}
+
+static void cd321x_dp_schedule_ack(struct cd321x *cd321x, u32 header,
+				   const u32 *data, u8 size)
+{
+	cd321x->dp_header = header;
+	cd321x->dp_vdo_data = data;
+	cd321x->dp_vdo_size = size;
+	schedule_work(&cd321x->dp_vdm_work);
+}
+
+static u32 cd321x_dp_status_vdo(const struct cd321x_status *st)
+{
+	u32 status = le32_to_cpu(st->dp_sid_status.status_rx);
+
+	status |= DP_STATUS_ENABLED;
+
+	if (!DP_STATUS_CONNECTION(status))
+		status |= DP_STATUS_CON_UFP_D;
+
+	if (st->data_status & CD321X_DATA_STATUS_HPD_LEVEL)
+		status |= DP_STATUS_HPD_STATE;
+	else
+		status &= ~DP_STATUS_HPD_STATE;
+
+	if (st->data_status & CD321X_DATA_STATUS_HPD_IRQ)
+		status |= DP_STATUS_IRQ_HPD;
+	else
+		status &= ~DP_STATUS_IRQ_HPD;
+
+	/*
+	 * Firmware already picked a pin assignment. Prefer multi-function when
+	 * it chose D so typec-displayport configures the same pin, not C.
+	 */
+	if (TPS_DATA_STATUS_DP_SPEC_PIN_ASSIGNMENT(st->data_status) ==
+	    TPS_DATA_STATUS_DP_SPEC_PIN_ASSIGNMENT_D)
+		status |= DP_STATUS_PREFER_MULTI_FUNC;
+	else
+		status &= ~DP_STATUS_PREFER_MULTI_FUNC;
+
+	return status;
+}
+
+static int cd321x_dp_enter(struct typec_altmode *alt, u32 *vdo)
+{
+	struct cd321x *cd321x = typec_altmode_get_drvdata(alt);
+	int svdm_version;
+	u32 header;
+
+	if (!READ_ONCE(cd321x->dp_partner_available))
+		return -ENOTCONN;
+
+	if (cd321x->dp_initialized)
+		return -EOPNOTSUPP;
+
+	svdm_version = typec_altmode_get_svdm_version(alt);
+	if (svdm_version < 0)
+		return svdm_version;
+
+	header = VDO(USB_TYPEC_DP_SID, 1, svdm_version, CMD_ENTER_MODE);
+	header |= VDO_OPOS(USB_TYPEC_DP_MODE);
+	header |= VDO_CMDT(CMDT_RSP_ACK);
+	cd321x_dp_schedule_ack(cd321x, header, NULL, 1);
+
+	return 0;
+}
+
+static int cd321x_dp_exit(struct typec_altmode *alt)
+{
+	const struct typec_altmode *partner = typec_altmode_get_partner(alt);
+
+	/*
+	 * Firmware owns Exit Mode. Reject OS-initiated exit so the mux and
+	 * the PD controller cannot drift apart.
+	 */
+	if (partner)
+		dev_dbg(&partner->dev, "firmware does not support DP mode override\n");
+
+	return -EOPNOTSUPP;
+}
+
+static int cd321x_dp_vdm(struct typec_altmode *alt, const u32 hdr,
+			 const u32 *data, int count)
+{
+	struct cd321x *cd321x = typec_altmode_get_drvdata(alt);
+	int cmd_type = PD_VDO_CMDT(hdr);
+	int cmd = PD_VDO_CMD(hdr);
+	int svdm_version;
+	u32 header;
+
+	if (!READ_ONCE(cd321x->dp_partner_available))
+		return -ENOTCONN;
+
+	if (cd321x->dp_initialized && cmd != DP_CMD_STATUS_UPDATE &&
+	    cmd != DP_CMD_CONFIGURE)
+		return -EOPNOTSUPP;
+
+	svdm_version = typec_altmode_get_svdm_version(alt);
+	if (svdm_version < 0)
+		return svdm_version;
+
+	if (cmd_type != CMDT_INIT)
+		return 0;
+
+	if (cd321x->tps.partner && PD_VDO_SVDM_VER(hdr) < svdm_version) {
+		typec_partner_set_svdm_version(cd321x->tps.partner,
+					       PD_VDO_SVDM_VER(hdr));
+		svdm_version = PD_VDO_SVDM_VER(hdr);
+	}
+
+	header = VDO(USB_TYPEC_DP_SID, 1, svdm_version, cmd);
+	header |= VDO_OPOS(USB_TYPEC_DP_MODE);
+
+	switch (cmd) {
+	case DP_CMD_STATUS_UPDATE:
+		header |= VDO_CMDT(CMDT_RSP_ACK);
+		cd321x_dp_schedule_ack(cd321x, header, &cd321x->dp_status, 2);
+		break;
+	case DP_CMD_CONFIGURE:
+		if (count < 2) {
+			header |= VDO_CMDT(CMDT_RSP_NAK);
+			cd321x_dp_schedule_ack(cd321x, header, NULL, 1);
+			break;
+		}
+		header |= VDO_CMDT(CMDT_RSP_ACK);
+		cd321x->dp_initialized = true;
+		cd321x_dp_schedule_ack(cd321x, header, NULL, 1);
+		break;
+	default:
+		header |= VDO_CMDT(CMDT_RSP_ACK);
+		cd321x_dp_schedule_ack(cd321x, header, NULL, 1);
+		break;
+	}
+
+	return 0;
+}
+
+static const struct typec_altmode_ops cd321x_dp_altmode_ops = {
+	.enter = cd321x_dp_enter,
+	.exit = cd321x_dp_exit,
+	.vdm = cd321x_dp_vdm,
+};
+
+static void cd321x_dp_unregister_partner(struct cd321x *cd321x)
+{
+	struct typec_altmode *alt = cd321x->partner_altmode_dp;
+
+	if (!alt) {
+		WRITE_ONCE(cd321x->dp_partner_available, false);
+		return;
+	}
+
+	/*
+	 * Clear the partner pointer first so an in-flight Enter/VDM callback
+	 * will not schedule a new ACK after cancel_work_sync() returns.
+	 */
+	cd321x->dp_initialized = false;
+	WRITE_ONCE(cd321x->dp_partner_available, false);
+	WRITE_ONCE(cd321x->partner_altmode_dp, NULL);
+	cancel_work_sync(&cd321x->dp_vdm_work);
+	typec_unregister_altmode(alt);
+	cd321x->dp_status = 0;
+}
+
+static void cd321x_dp_register_partner(struct cd321x *cd321x,
+				       const struct cd321x_status *st)
+{
+	struct typec_altmode_desc desc = { };
+	struct typec_altmode *alt;
+	u32 cap;
+
+	if (cd321x->partner_altmode_dp || IS_ERR_OR_NULL(cd321x->tps.partner))
+		return;
+
+	cap = le32_to_cpu(st->dp_sid_status.mode_data);
+	if (!DP_CAP_PIN_ASSIGN_UFP_D(cap) && !DP_CAP_PIN_ASSIGN_DFP_D(cap))
+		cap = DP_CAP_UFP_D | DP_CONF_SET_PIN_ASSIGN(CD321X_DP_PIN_ASSIGN);
+
+	desc.svid = USB_TYPEC_DP_SID;
+	desc.mode = USB_TYPEC_DP_MODE;
+	desc.vdo = cap;
+
+	/*
+	 * device_register() may probe typec-displayport and run its worker
+	 * before typec_partner_register_altmode() returns. Publish availability
+	 * first so that initial Enter Mode is not spuriously rejected.
+	 */
+	WRITE_ONCE(cd321x->dp_partner_available, true);
+	alt = typec_partner_register_altmode(cd321x->tps.partner, &desc);
+	if (IS_ERR(alt)) {
+		WRITE_ONCE(cd321x->dp_partner_available, false);
+		dev_err(cd321x->tps.dev,
+			"failed to register partner DP altmode: %ld\n",
+			PTR_ERR(alt));
+		return;
+	}
+
+	WRITE_ONCE(cd321x->partner_altmode_dp, alt);
+}
+
 static void cd321x_update_work(struct work_struct *work)
 {
 	struct cd321x *cd321x = container_of(to_delayed_work(work),
@@ -676,6 +904,7 @@ static void cd321x_update_work(struct work_struct *work)
 
 	st = cd321x->update_status;
 	cd321x->update_status.status_changed = 0;
+	cd321x->update_status.data_status_changed = 0;
 
 	bool old_connected = !!tps->partner;
 	bool new_connected = st.status & TPS_STATUS_PLUG_PRESENT;
@@ -683,6 +912,8 @@ static void cd321x_update_work(struct work_struct *work)
 
 	bool usb_connection = st.data_status &
 			      (TPS_DATA_STATUS_USB2_CONNECTION | TPS_DATA_STATUS_USB3_CONNECTION);
+	bool dp_hpd_event = st.data_status_changed &
+			    (CD321X_DATA_STATUS_HPD_LEVEL | CD321X_DATA_STATUS_HPD_IRQ);
 
 	enum usb_role old_role = usb_role_switch_get_role(tps->role_sw);
 	enum usb_role new_role = USB_ROLE_NONE;
@@ -714,6 +945,7 @@ static void cd321x_update_work(struct work_struct *work)
 
 	/* Process partner disconnection or change */
 	if (!new_connected || partner_changed) {
+		cd321x_dp_unregister_partner(cd321x);
 		if (!IS_ERR(tps->partner))
 			typec_unregister_partner(tps->partner);
 		tps->partner = NULL;
@@ -766,8 +998,22 @@ static void cd321x_update_work(struct work_struct *work)
 	/* Update the TypeC MUX/PHY state */
 	cd321x_typec_update_mode(tps, &st);
 
+	cd321x->dp_status = cd321x_dp_status_vdo(&st);
+	if (st.data_status & TPS_DATA_STATUS_DP_CONNECTION)
+		cd321x_dp_register_partner(cd321x, &st);
+	else
+		cd321x_dp_unregister_partner(cd321x);
+
 	/* Launch the USB role switch */
 	usb_role_switch_set_role(tps->role_sw, new_role);
+
+	/*
+	 * Initial HPD is delivered through the Status Update ACK. Later HPD
+	 * and IRQ_HPD edges become Attention VDOs for typec-displayport.
+	 */
+	if (dp_hpd_event && cd321x->dp_initialized && cd321x->port_altmode_dp)
+		typec_altmode_attention(cd321x->port_altmode_dp,
+					cd321x->dp_status);
 
 	power_supply_changed(tps->psy);
 }
@@ -775,6 +1021,8 @@ static void cd321x_update_work(struct work_struct *work)
 static void cd321x_queue_status(struct cd321x *cd321x)
 {
 	cd321x->update_status.status_changed |= cd321x->update_status.status ^ cd321x->tps.status;
+	cd321x->update_status.data_status_changed |=
+		cd321x->update_status.data_status ^ cd321x->tps.data_status;
 
 	cd321x->update_status.status = cd321x->tps.status;
 	cd321x->update_status.pwr_status = cd321x->tps.pwr_status;
@@ -1178,11 +1426,13 @@ static int cd321x_register_port_altmodes(struct cd321x *cd321x)
 	memset(&desc, 0, sizeof(desc));
 	desc.svid = USB_TYPEC_DP_SID;
 	desc.mode = USB_TYPEC_DP_MODE;
-	desc.vdo = DP_CONF_SET_PIN_ASSIGN(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D));
-	desc.vdo |= DP_CAP_DFP_D;
+	desc.vdo = DP_CAP_DFP_D | DP_CAP_RECEPTACLE | DP_CAP_USB |
+		   DP_CONF_SET_PIN_ASSIGN(CD321X_DP_PIN_ASSIGN);
 	amode = typec_port_register_altmode(cd321x->tps.port, &desc);
 	if (IS_ERR(amode))
 		return PTR_ERR(amode);
+	typec_altmode_set_ops(amode, &cd321x_dp_altmode_ops);
+	typec_altmode_set_drvdata(amode, cd321x);
 	cd321x->port_altmode_dp = amode;
 
 	memset(&desc, 0, sizeof(desc));
@@ -1206,6 +1456,7 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
 	int ret;
 
 	INIT_DELAYED_WORK(&cd321x->update_work, cd321x_update_work);
+	INIT_WORK(&cd321x->dp_vdm_work, cd321x_dp_vdm_work);
 
 	ret = tps6598x_register_port(tps, fwnode);
 	if (ret)
@@ -1258,6 +1509,7 @@ cd321x_unregister_port(struct tps6598x *tps)
 {
 	struct cd321x *cd321x = container_of(tps, struct cd321x, tps);
 
+	cd321x_dp_unregister_partner(cd321x);
 	typec_thunderbolt_switch_put(cd321x->tbt_switch);
 	cd321x->tbt_switch = NULL;
 	typec_mux_put(cd321x->mux);
@@ -1680,6 +1932,7 @@ static void cd321x_remove(struct tps6598x *tps)
 	struct cd321x *cd321x = container_of(tps, struct cd321x, tps);
 
 	cancel_delayed_work_sync(&cd321x->update_work);
+	cd321x_dp_unregister_partner(cd321x);
 }
 
 int tipd_init(struct tps6598x *tps)

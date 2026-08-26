@@ -358,6 +358,7 @@ struct cd321x_status {
 	u32 pwr_status;
 	u32 data_status;
 	u32 status_changed;
+	u32 data_status_changed;
 	struct usb_pd_identity partner_identity;
 	struct tps6598x_dp_sid_status_reg dp_sid_status;
 	struct tps6598x_intel_vid_status_reg intel_vid_status;
@@ -373,6 +374,7 @@ struct cd321x {
 
 	struct typec_altmode *port_altmode_dp;
 	struct typec_altmode *port_altmode_tbt;
+	struct typec_altmode *partner_altmode_dp;
 
 	struct typec_mux *mux;
 	struct typec_mux_state state;
@@ -382,6 +384,18 @@ struct cd321x {
 	struct cd321x_status update_status;
 	struct delayed_work update_work;
 	struct usb_pd_identity cur_partner_identity;
+
+	/*
+	 * Firmware-managed DP Alternate Mode. CD321x enters DP on its own;
+	 * Linux only ACKs the typec-displayport handshake and forwards HPD.
+	 */
+	struct work_struct dp_vdm_work;
+	u32 dp_header;
+	u32 dp_status;
+	const u32 *dp_vdo_data;
+	u8 dp_vdo_size;
+	bool dp_initialized;
+	bool dp_partner_available;
 };
 
 struct sn201202x {
