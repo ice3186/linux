@@ -15,6 +15,7 @@
  */
 
 #define NO_SPI_TRACKPAD
+#define ENABLE_DCPEXT_TYPEC
 #include "t600x-j314-j316.dtsi"
 
 / {
@@ -29,7 +30,8 @@
 
 &display {
 	iommus = <&disp0_dart 0 0x100 0x0 0x10 0x0>,
-		<&dispext0_dart 0 0x100 0x0 0x10 0x0>;
+		<&dispext0_dart 0 0x100 0x0 0x10 0x0>,
+		<&dispext1_dart 0 0x100 0x0 0x10 0x0>;
 };
 
 /* HACK: keep dptx_phy_ps power-domain always-on

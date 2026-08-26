@@ -22,6 +22,9 @@
 		bluetooth0 = &bluetooth0;
 		dcp = &dcp;
 		dcpext0 = &dcpext0;
+#ifdef ENABLE_DCPEXT_TYPEC
+		dcpext1 = &dcpext1;
+#endif
 		disp0 = &display;
 		disp0_piodma = &disp0_piodma;
 		disp0-piodma = &disp0_piodma;
@@ -201,6 +204,11 @@
 			power-role = "dual";
 			data-role = "dual";
 
+#ifdef ENABLE_DCPEXT_TYPEC
+			/* Experimental native DisplayPort Alt Mode path. */
+			displayport = <&dcpext1>;
+#endif
+
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -261,6 +269,55 @@
 		interrupt-names = "irq";
 	};
 };
+
+#ifdef ENABLE_DCPEXT_TYPEC
+/*
+ * Fairydust's native DisplayPort experiment maps one external DCP to the
+ * front-left Type-C port. Keep it opt-in so older J314/J316 machines retain
+ * their existing device tree unless their model include enables it.
+ */
+&display {
+	iommus = <&disp0_dart 0 0x0 0x0 0x0 0xfc000000>,
+		<&dispext0_dart 0 0x0 0x0 0x0 0xfc000000>,
+		<&dispext1_dart 0 0x0 0x0 0x0 0xfc000000>;
+};
+
+&dispext1_dart {
+	status = "okay";
+};
+
+&dcpext1_dart {
+	status = "okay";
+};
+
+&dcpext1_mbox {
+	status = "okay";
+};
+
+&dcpext1 {
+	status = "okay";
+	apple,connector-type = "DP";
+	apple,dptx-phy = <1>;
+	phys = <&atcphy1 PHY_TYPE_DP>;
+	phy-names = "dp-phy";
+	mux-controls = <&atcphy1_xbar 0>;
+	mux-control-names = "dp-xbar";
+	mux-index = <2>;
+};
+
+&dpaudio2 {
+	status = "okay";
+};
+
+&atcphy1_xbar {
+	status = "okay";
+};
+
+&ps_atc1_common {
+	/* The experimental DP-alt suspend/resume path requires this domain. */
+	apple,always-on;
+};
+#endif
 
 &i2c1 {
 	status = "okay";
