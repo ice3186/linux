@@ -505,6 +505,10 @@ int dcp_start(struct platform_device *pdev)
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 	int ret;
 
+	/* A component without RTKit is not usable and must never be started. */
+	if (!dcp || !dcp->rtk)
+		return -ENODEV;
+
 	init_completion(&dcp->start_done);
 
 	/* start RTKit endpoints */
@@ -757,10 +761,9 @@ static int dcp_create_piodma_iommu_dev(struct apple_dcp *dcp)
 	}
 
 	dcp->iommu_dom = iommu_get_domain_for_dev(&dcp->piodma->dev);
-	if (IS_ERR(dcp->iommu_dom)) {
-		ret = dev_err_probe(dcp->dev, PTR_ERR(dcp->iommu_dom),
-				    "Failed to get default iommu domain for "
-				    "piodma device\n");
+	if (IS_ERR_OR_NULL(dcp->iommu_dom)) {
+		ret = IS_ERR(dcp->iommu_dom) ? PTR_ERR(dcp->iommu_dom) :
+			-ENODEV;
 		dcp->iommu_dom = NULL;
 		goto err_destroy_pdev;
 	}
@@ -768,6 +771,7 @@ static int dcp_create_piodma_iommu_dev(struct apple_dcp *dcp)
 	return 0;
 err_destroy_pdev:
 	of_platform_device_destroy(&dcp->piodma->dev, NULL);
+	dcp->piodma = NULL;
 	return ret;
 }
 
@@ -1056,9 +1060,9 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 		dcp->connector_type = DRM_MODE_CONNECTOR_Unknown;
 
 	ret = dcp_create_piodma_iommu_dev(dcp);
-	if (ret || !dcp->iommu_dom)
+	if (ret)
 		return dev_err_probe(dev, ret,
-				"Failed to created PIODMA iommu child device");
+				"Failed to create PIODMA IOMMU child device\n");
 
 	ret = dcp_get_disp_regs(dcp);
 	if (ret) {
