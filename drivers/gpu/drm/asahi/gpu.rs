@@ -28,7 +28,7 @@ use kernel::{
         Mem,
         MemFlag, //
     },
-    iosys_map::IoSysMapRef,
+    io::IoSysMap,
     macros::versions,
     new_mutex,
     prelude::*,
@@ -334,7 +334,7 @@ trait GpuManagerPriv {
 }
 
 pub(crate) struct RtkitObject {
-    vmap: shmem::VMap<gem::AsahiObject, u8>,
+    vmap: shmem::VMapOwned<gem::AsahiObject>,
     mapping: mmu::KernelMapping,
 }
 
@@ -342,7 +342,7 @@ impl rtkit::Buffer for RtkitObject {
     fn iova(&self) -> Result<usize> {
         Ok(self.mapping.iova() as usize)
     }
-    fn buf(&mut self) -> Result<IoSysMapRef<'_, u8>> {
+    fn buf(&mut self) -> Result<IoSysMap<'_, [u8]>> {
         Ok(self.vmap.get())
     }
 }
@@ -592,7 +592,8 @@ impl GpuManager::ver {
 
         let mgr = Arc::from(mgr);
 
-        let rtkit = rtkit::RtKit::<GpuManager::ver>::new(dev.as_ref(), None, 0, mgr.clone())?;
+        let rtkit =
+            rtkit::RtKit::<GpuManager::ver>::new(dev.as_ref().as_ref(), None, 0, mgr.clone())?;
 
         *mgr.rtkit.lock() = Some(rtkit);
 
@@ -768,8 +769,9 @@ impl GpuManager::ver {
     }
 
     fn load_hwdata_blob(dev: &AsahiDevice, name: &CStr, size_name: &CStr) -> Result<KVVec<u8>> {
-        let of_node = dev.as_ref().of_node().ok_or(EINVAL)?;
+        let of_node = dev.as_ref().as_ref().of_node().ok_or(EINVAL)?;
         let size: usize = dev
+            .as_ref()
             .as_ref()
             .fwnode()
             .ok_or(ENOENT)?
@@ -886,7 +888,7 @@ impl GpuManager::ver {
             return Err(EIO);
         }
 
-        let fwnode = dev.as_ref().fwnode().ok_or(ENOENT)?;
+        let fwnode = dev.as_ref().as_ref().fwnode().ok_or(ENOENT)?;
 
         Ok(KBox::new(
             hw::DynConfig {

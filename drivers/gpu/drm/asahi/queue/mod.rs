@@ -475,8 +475,14 @@ impl Queue::ver {
 
         // Priorities are handled by the AGX scheduler, there is no meaning within a
         // per-queue scheduler. Use a single run queue wth Kernel priority.
-        let sched =
-            sched::Scheduler::new(dev.as_ref(), 1, WQ_SIZE, 0, 100000, c_str!("asahi_sched"))?;
+        let sched = sched::Scheduler::new(
+            dev.as_ref().as_ref(),
+            1,
+            WQ_SIZE,
+            0,
+            100000,
+            c_str!("asahi_sched"),
+        )?;
         let entity = sched::Entity::new(&sched, sched::Priority::Kernel)?;
 
         let buffer =

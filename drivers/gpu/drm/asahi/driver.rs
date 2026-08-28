@@ -2,9 +2,14 @@
 
 //! Top-level GPU driver implementation.
 
+use core::ops::Deref;
+
 use kernel::{
     c_str,
-    device::Core,
+    device::{
+        Core,
+        DeviceContext, //
+    },
     dma::{
         Device,
         DmaMask, //
@@ -16,7 +21,8 @@ use kernel::{
     prelude::*,
     sync::{
         aref::ARef,
-        Arc, //
+        Arc,
+        SetOnce, //
     }, //
 };
 
@@ -31,29 +37,54 @@ use crate::{
 
 use kernel::macros::vtable;
 
-/// Holds a reference to the top-level `GpuManager` object.
-#[pin_data]
-pub(crate) struct AsahiData {
-    #[pin]
+/// The initialized per-device data.
+pub(crate) struct AsahiDataInner {
     pub(crate) gpu: Arc<dyn gpu::GpuManager>,
-    pub(crate) pdev: ARef<platform::Device>,
+    pub(crate) _pdev: ARef<platform::Device>,
     pub(crate) resources: regs::Resources,
 }
 
-unsafe impl Send for AsahiData {}
-unsafe impl Sync for AsahiData {}
+/// Holds the per-device data while allowing the DRM device to be created first.
+pub(crate) struct AsahiData(SetOnce<AsahiDataInner>);
 
-pub(crate) struct AsahiDriver {
-    #[expect(unused)]
-    drm: ARef<drm::Device<Self>>,
+impl AsahiData {
+    fn uninitialized() -> Self {
+        Self(SetOnce::new())
+    }
+
+    /// Initialize the device data after the DRM device and GPU manager have been constructed.
+    fn initialize(&self, data: AsahiDataInner) {
+        assert!(
+            self.0.populate(data),
+            "Asahi device data initialized more than once"
+        );
+    }
 }
 
-unsafe impl Send for AsahiDriver {}
-unsafe impl Sync for AsahiDriver {}
+impl Deref for AsahiData {
+    type Target = AsahiDataInner;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("Asahi device data is uninitialized")
+    }
+}
+
+pub(crate) struct AsahiDriver;
 
 /// Convenience type alias for the DRM device type for this driver.
-pub(crate) type AsahiDevice = drm::device::Device<AsahiDriver>;
+pub(crate) type AsahiDevice<Ctx = drm::Normal> = drm::device::Device<AsahiDriver, Ctx>;
 pub(crate) type AsahiDevRef = ARef<AsahiDevice>;
+
+#[pin_data(PinnedDrop)]
+pub(crate) struct AsahiDriverData<'bound> {
+    _drm: AsahiDevRef,
+    _registration: drm::Registration<'bound, AsahiDriver>,
+}
+
+#[pinned_drop]
+impl PinnedDrop for AsahiDriverData<'_> {
+    fn drop(self: Pin<&mut Self>) {}
+}
 
 /// DRM Driver metadata
 const INFO: drm::driver::DriverInfo = drm::driver::DriverInfo {
@@ -69,17 +100,17 @@ const INFO: drm::driver::DriverInfo = drm::driver::DriverInfo {
 impl drm::driver::Driver for AsahiDriver {
     /// Our `DeviceData` type, reference-counted
     type Data = AsahiData;
+    type RegistrationData<'a> = ();
     /// Our `File` type.
     type File = file::File;
     /// Our `Object` type.
     type Object = drm::gem::shmem::Object<AsahiObject>;
+    type ParentDevice<Ctx: DeviceContext> = platform::Device<Ctx>;
 
     const INFO: drm::driver::DriverInfo = INFO;
-    const FEATURES: u32 = drm::driver::FEAT_GEM
-        | drm::driver::FEAT_RENDER
-        | drm::driver::FEAT_SYNCOBJ
-        | drm::driver::FEAT_SYNCOBJ_TIMELINE
-        | drm::driver::FEAT_GEM_GPUVA;
+    const FEAT_RENDER: bool = true;
+    const FEAT_SYNCOBJ: bool = true;
+    const FEAT_SYNCOBJ_TIMELINE: bool = true;
 
     kernel::declare_drm_ioctls! {
         (ASAHI_GET_PARAMS,      drm_asahi_get_params,
@@ -151,13 +182,16 @@ kernel::of_device_table!(
 /// Platform Driver implementation for `AsahiDriver`.
 impl platform::Driver for AsahiDriver {
     type IdInfo = &'static hw::HwConfig;
+    type Data<'bound> = AsahiDriverData<'bound>;
+    // The WIP driver does not yet have a sound teardown path.
+    const SUPPRESS_BIND_ATTRS: bool = true;
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
 
     /// Device probe function.
-    fn probe(
-        pdev: &platform::Device<Core>,
-        info: Option<&Self::IdInfo>,
-    ) -> impl PinInit<Self, Error> {
+    fn probe<'bound>(
+        pdev: &'bound platform::Device<Core<'_>>,
+        info: Option<&'bound Self::IdInfo>,
+    ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
         debug::update_debug_flags();
 
         dev_info!(pdev.as_ref(), "Probing...\n");
@@ -179,31 +213,24 @@ impl platform::Driver for AsahiDriver {
             .property_read_array_vec(c_str!("apple,firmware-compat"), 3)?
             .required_by(pdev.as_ref())?;
 
-        // TODO: This is very temporary
-        // SAFETY: This should be safe as data is not touched by the driver
-        // untill it gets fully initialised.
-        // Additionally drm::device::Device::release() will not drop data and
-        // leaks instead.
-        let uninit = unsafe {
-            pin_init::pin_init_from_closure::<AsahiData, kernel::error::Error>(|_slot| Ok(()))
-        };
-        let drm: ARef<AsahiDevice> = drm::device::Device::new(pdev.as_ref(), uninit)?;
+        let drm =
+            drm::UnregisteredDevice::<AsahiDriver>::new(pdev, Ok(AsahiData::uninitialized()))?;
 
         let gpu = match (cfg.gpu_gen, cfg.gpu_variant, compat.as_slice()) {
             (hw::GpuGen::G13, _, &[12, 3, 0]) => {
-                gpu::GpuManagerG13V12_3::new(&drm.clone(), &res, cfg)? as Arc<dyn gpu::GpuManager>
+                gpu::GpuManagerG13V12_3::new(&drm, &res, cfg)? as Arc<dyn gpu::GpuManager>
             }
             (hw::GpuGen::G14, hw::GpuVariant::G, &[12, 4, 0]) => {
-                gpu::GpuManagerG14V12_4::new(&drm.clone(), &res, cfg)? as Arc<dyn gpu::GpuManager>
+                gpu::GpuManagerG14V12_4::new(&drm, &res, cfg)? as Arc<dyn gpu::GpuManager>
             }
             (hw::GpuGen::G13, _, &[13, 5, 0]) => {
-                gpu::GpuManagerG13V13_5::new(&drm.clone(), &res, cfg)? as Arc<dyn gpu::GpuManager>
+                gpu::GpuManagerG13V13_5::new(&drm, &res, cfg)? as Arc<dyn gpu::GpuManager>
             }
             (hw::GpuGen::G14, hw::GpuVariant::G, &[13, 5, 0]) => {
-                gpu::GpuManagerG14V13_5::new(&drm.clone(), &res, cfg)? as Arc<dyn gpu::GpuManager>
+                gpu::GpuManagerG14V13_5::new(&drm, &res, cfg)? as Arc<dyn gpu::GpuManager>
             }
             (hw::GpuGen::G14, _, &[13, 5, 0]) => {
-                gpu::GpuManagerG14XV13_5::new(&drm.clone(), &res, cfg)? as Arc<dyn gpu::GpuManager>
+                gpu::GpuManagerG14XV13_5::new(&drm, &res, cfg)? as Arc<dyn gpu::GpuManager>
             }
             _ => {
                 dev_info!(
@@ -217,21 +244,46 @@ impl platform::Driver for AsahiDriver {
             }
         };
 
-        let data = try_pin_init!(AsahiData {
+        let data = AsahiDataInner {
             gpu,
-            pdev: pdev.into(),
+            _pdev: pdev.into(),
             resources: res,
-        });
+        };
 
-        let ptr: *const AsahiData = &raw const **drm;
-        unsafe {
-            data.__pinned_init(ptr as *mut AsahiData)?;
+        (*drm).initialize(data);
+
+        if let Err(err) = (*drm).gpu.init() {
+            dev_err!(
+                pdev.as_ref(),
+                "GPU initialization failed after callback cycles were established: {:?}\n",
+                err
+            );
+            // The WIP manager/RTKit callback graph may now contain reference cycles. Returning
+            // from probe would revoke platform devres while leaked callbacks and SG tables can
+            // still access them. Fail closed; reboot is the only supported recovery.
+            panic!("Asahi GPU initialization entered non-teardown-safe state; reboot required");
         }
 
-        (*drm).gpu.init()?;
+        // SAFETY: The registration is stored in the platform driver's binding data and is
+        // therefore dropped when the platform device is unbound; it is never forgotten.
+        let registration = match unsafe { drm::Registration::new(pdev.as_ref(), drm, (), 0) } {
+            Ok(registration) => registration,
+            Err(err) => {
+                dev_err!(
+                    pdev.as_ref(),
+                    "DRM registration failed after callback cycles were established: {:?}\n",
+                    err
+                );
+                // As above, returning would revoke devres beneath the leaked callback graph.
+                // Panic contains the unsafe state; reboot is the only supported recovery.
+                panic!("Asahi DRM registration entered non-teardown-safe state; reboot required");
+            }
+        };
+        let drm = registration.device().into();
 
-        drm::driver::Registration::new_foreign_owned(&drm, pdev.as_ref(), 0)?;
-
-        Ok(Self { drm })
+        Ok(AsahiDriverData {
+            _drm: drm,
+            _registration: registration,
+        })
     }
 }

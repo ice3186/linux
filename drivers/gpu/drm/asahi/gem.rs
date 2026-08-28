@@ -11,7 +11,7 @@ use kernel::{
     drm,
     drm::gem::{
         shmem,
-        shmem::VMap,
+        shmem::VMapOwned,
         BaseObject,
         DriverObject, //
     },
@@ -59,15 +59,25 @@ pub(crate) type Object = shmem::Object<AsahiObject>;
 unsafe impl Send for AsahiObject {}
 unsafe impl Sync for AsahiObject {}
 
-// /// Type alias for the SGTable type for this driver.
-// pub(crate) type SGTable = shmem::SGTable<AsahiObject>;
+/// Type alias for the SGTable type for this driver.
+pub(crate) type SGTable = shmem::SGTable<AsahiObject>;
+
+/// Return the compatibility SG table used by Asahi's persistent GPU mappings.
+///
+/// Asahi exclusively uses this path and never mixes it with the device-managed `sg_table()` API.
+/// The current driver also does not support unbinding while GPU mappings exist. This helper must
+/// be replaced with the device-managed API before clean driver unbind is supported.
+pub(crate) fn owned_sg_table(obj: &Object) -> Result<SGTable> {
+    // SAFETY: The no-mixing and no-unbind requirements are driver invariants documented above.
+    unsafe { obj.owned_sg_table_unchecked() }
+}
 
 /// A shared reference to a GEM object for this driver.
 pub(crate) struct ObjectRef {
     /// The underlying GEM object reference
     pub(crate) gem: ARef<Object>,
     /// The kernel-side VMap of this object, if needed
-    vmap: Option<VMap<AsahiObject, u8>>,
+    vmap: Option<VMapOwned<AsahiObject>>,
 }
 
 crate::no_debug!(ObjectRef);
@@ -81,7 +91,7 @@ impl ObjectRef {
     }
 
     /// Return the `VMap` for this object, creating it if necessary.
-    pub(crate) fn vmap(&mut self) -> Result<shmem::VMapRef<'_, AsahiObject, u8>> {
+    pub(crate) fn vmap(&mut self) -> Result<shmem::VMapRef<'_, AsahiObject>> {
         if self.vmap.is_none() {
             self.vmap = Some(self.gem.owned_vmap()?);
         }

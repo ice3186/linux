@@ -26,7 +26,6 @@ use core::cmp;
 
 use kernel::{
     addr::PhysicalAddr,
-    bindings::drm_gpuvm_flags_DRM_GPUVM_IMMEDIATE_MODE,
     c_str,
     device,
     drm::{
@@ -205,7 +204,7 @@ struct VmBo {
     inner: Mutex<VmBoInner>,
 }
 
-impl gpuvm::DriverGpuVmBo for VmBo {
+impl VmBo {
     fn new() -> impl PinInit<Self> {
         pin_init!(VmBo {
             inner <- new_mutex!(VmBoInner {
@@ -218,30 +217,47 @@ impl gpuvm::DriverGpuVmBo for VmBo {
 
 #[derive(Default)]
 struct StepContext {
-    new_va: Option<Pin<KBox<gpuvm::GpuVa<VmInner>>>>,
-    prev_va: Option<Pin<KBox<gpuvm::GpuVa<VmInner>>>>,
-    next_va: Option<Pin<KBox<gpuvm::GpuVa<VmInner>>>>,
-    vm_bo: Option<ARef<gpuvm::GpuVmBo<VmInner>>>,
+    va_allocs: [Option<gpuvm::GpuVaAlloc<VmInner>>; 3],
     prot: Prot,
+    single_page: bool,
+}
+
+impl StepContext {
+    fn take_va(&mut self) -> gpuvm::GpuVaAlloc<VmInner> {
+        self.va_allocs
+            .iter_mut()
+            .find_map(Option::take)
+            .expect("GPUVA preallocation exhausted")
+    }
+
+    fn put_va(&mut self, va: gpuvm::GpuVaAlloc<VmInner>) {
+        let slot = self
+            .va_allocs
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .expect("GPUVA preallocation overflow");
+        *slot = Some(va);
+    }
 }
 
 impl gpuvm::DriverGpuVm for VmInner {
     type Driver = driver::AsahiDriver;
-    type GpuVmBo = VmBo;
-    type StepContext = StepContext;
+    type Object = gem::Object;
+    type VaData = ();
+    type VmBoData = VmBo;
+    type SmContext<'ctx> = StepContext;
 
-    fn step_map(
-        self: &mut gpuvm::UpdatingGpuVm<'_, Self>,
-        op: &mut gpuvm::OpMap<Self>,
-        ctx: &mut Self::StepContext,
-    ) -> Result {
+    fn sm_step_map<'op, 'ctx>(
+        &mut self,
+        op: gpuvm::OpMap<'op, Self>,
+        ctx: &mut Self::SmContext<'ctx>,
+    ) -> Result<gpuvm::OpMapped<'op, Self>> {
         let mut iova = op.addr();
-        let mut left = op.range() as usize;
-        let mut offset = op.offset() as usize;
+        let mut left = op.length() as usize;
+        let mut offset = op.gem_offset() as usize;
 
-        let bo = ctx.vm_bo.as_ref().expect("step_map with no BO");
-
-        let one_page = op.flags().contains(gpuvm::GpuVaFlags::REPEAT);
+        let bo = op.vm_bo();
+        let one_page = ctx.single_page;
 
         let mut do_map = |mut addr: usize, mut len: usize, offset: &mut usize| -> Result<bool> {
             if left == 0 {
@@ -286,7 +302,7 @@ impl gpuvm::DriverGpuVm for VmInner {
             Ok(true)
         };
 
-        let guard = bo.inner().inner.lock();
+        let guard = bo.data().inner.lock();
         if let Some(sg_vec) = guard.sg_vec.as_ref() {
             let start_idx = sg_vec
                 .binary_search_by(|range| {
@@ -319,76 +335,62 @@ impl gpuvm::DriverGpuVm for VmInner {
                 }
             }
         }
+        core::mem::drop(guard);
 
-        let gpuva = ctx.new_va.take().expect("Multiple step_map calls");
+        let gpuva = ctx.take_va();
 
-        if op
-            .map_and_link_va(
-                self,
-                gpuva,
-                ctx.vm_bo.as_ref().expect("step_map with no BO"),
-            )
-            .is_err()
-        {
-            dev_err!(
-                self.dev.as_ref(),
-                "map_and_link_va failed: {:#x} [{:#x}] -> {:#x}\n",
-                op.offset(),
-                op.range(),
-                op.addr()
-            );
-            return Err(EINVAL);
-        }
-        Ok(())
+        Ok(op.insert(gpuva, pin_init::default()))
     }
-    fn step_unmap(
-        self: &mut gpuvm::UpdatingGpuVm<'_, Self>,
-        op: &mut gpuvm::OpUnMap<Self>,
-        _ctx: &mut Self::StepContext,
-    ) -> Result {
-        let va = op.va().expect("step_unmap: missing VA");
+    fn sm_step_unmap<'op, 'ctx>(
+        &mut self,
+        op: gpuvm::OpUnmap<'op, Self>,
+        _ctx: &mut Self::SmContext<'ctx>,
+    ) -> Result<gpuvm::OpUnmapped<'op, Self>> {
+        let va = op.va();
 
-        mod_dev_dbg!(self.dev, "MMU: unmap: {:#x}:{:#x}\n", va.addr(), va.range());
+        mod_dev_dbg!(
+            self.dev,
+            "MMU: unmap: {:#x}:{:#x}\n",
+            va.addr(),
+            va.length()
+        );
 
         self.page_table
-            .unmap_pages(va.addr()..(va.addr() + va.range()))?;
+            .unmap_pages(va.addr()..(va.addr() + va.length()))?;
 
         if let Some(asid) = self.slot() {
             fence(Ordering::SeqCst);
-            mem::tlbi_range(asid as u8, va.addr() as usize, va.range() as usize);
+            mem::tlbi_range(asid as u8, va.addr() as usize, va.length() as usize);
             mod_dev_dbg!(
                 self.dev,
                 "MMU: flush range: asid={:#x} start={:#x} len={:#x}\n",
                 asid,
                 va.addr(),
-                va.range(),
+                va.length(),
             );
             mem::sync();
         }
 
-        if op.unmap_and_unlink_va_defer().is_none() {
-            dev_err!(self.dev.as_ref(), "step_unmap: could not unlink gpuva");
-        }
-        Ok(())
+        let (done, _removed) = op.remove();
+        Ok(done)
     }
-    fn step_remap(
-        self: &mut gpuvm::UpdatingGpuVm<'_, Self>,
-        op: &mut gpuvm::OpReMap<Self>,
-        vm_bo: &gpuvm::GpuVmBo<Self>,
-        ctx: &mut Self::StepContext,
-    ) -> Result {
-        let va = op.unmap().va().expect("No previous VA");
+    fn sm_step_remap<'op, 'ctx>(
+        &mut self,
+        op: gpuvm::OpRemap<'op, Self>,
+        ctx: &mut Self::SmContext<'ctx>,
+    ) -> Result<gpuvm::OpRemapped<'op, Self>> {
+        let va = op.va_to_unmap();
         let orig_addr = va.addr();
-        let orig_range = va.range();
+        let orig_range = va.length();
 
         // Only unmap the hole between prev/next, if they exist
-        let unmap_start = if let Some(op) = op.prev_map() {
-            op.addr() + op.range()
+        let unmap_start = if let Some(op) = op.prev() {
+            op.addr() + op.length()
         } else {
             orig_addr
         };
 
-        let unmap_end = if let Some(op) = op.next_map() {
+        let unmap_end = if let Some(op) = op.next() {
             op.addr()
         } else {
             orig_addr + orig_range
@@ -420,33 +422,18 @@ impl gpuvm::DriverGpuVm for VmInner {
             mem::sync();
         }
 
-        if op.unmap().unmap_and_unlink_va_defer().is_none() {
-            dev_err!(self.dev.as_ref(), "step_unmap: could not unlink gpuva");
+        let va1 = ctx.take_va();
+        let va2 = ctx.take_va();
+        let (done, ret) = op.remap([va1, va2], pin_init::default(), pin_init::default());
+        let gpuvm::OpRemapRet {
+            unmapped_va: _removed,
+            unused_va,
+        } = ret;
+        if let Some(unused_va) = unused_va {
+            ctx.put_va(unused_va);
         }
 
-        if let Some(prev_op) = op.prev_map() {
-            let prev_gpuva = ctx
-                .prev_va
-                .take()
-                .expect("Multiple step_remap calls with prev_op");
-            if prev_op.map_and_link_va(self, prev_gpuva, vm_bo).is_err() {
-                dev_err!(self.dev.as_ref(), "step_remap: could not relink prev gpuva");
-                return Err(EINVAL);
-            }
-        }
-
-        if let Some(next_op) = op.next_map() {
-            let next_gpuva = ctx
-                .next_va
-                .take()
-                .expect("Multiple step_remap calls with next_op");
-            if next_op.map_and_link_va(self, next_gpuva, vm_bo).is_err() {
-                dev_err!(self.dev.as_ref(), "step_remap: could not relink next gpuva");
-                return Err(EINVAL);
-            }
-        }
-
-        Ok(())
+        Ok(done)
     }
 }
 
@@ -481,7 +468,7 @@ impl VmInner {
     /// Map an `mm::Node` representing an mapping in VA space.
     fn map_node(&mut self, node: &mm::Node<(), KernelMappingInner>, prot: Prot) -> Result {
         let mut iova = node.start();
-        let guard = node.bo.as_ref().ok_or(EINVAL)?.inner().inner.lock();
+        let guard = node.bo.as_ref().ok_or(EINVAL)?.data().inner.lock();
         let sgt = guard.sgt.as_ref().ok_or(EINVAL)?;
         let mut offset = node.offset;
         let mut left = node.mapped_size;
@@ -545,7 +532,8 @@ impl VmInner {
 #[derive(Clone)]
 pub(crate) struct Vm {
     id: u64,
-    inner: ARef<gpuvm::GpuVm<VmInner>>,
+    inner: Arc<Mutex<gpuvm::UniqueRefGpuVm<VmInner>>>,
+    gpuvm: ARef<gpuvm::GpuVm<VmInner>>,
     dummy_obj: ARef<gem::Object>,
     binding: Arc<Mutex<VmBinding>>,
 }
@@ -610,7 +598,7 @@ pub(crate) struct KernelMappingInner {
     // - Drop the owner GpuVm last, since that again can take resv locks when the refcount drops to 0
     bo: Option<ARef<gpuvm::GpuVmBo<VmInner>>>,
     _gem: Option<ARef<gem::Object>>,
-    owner: ARef<gpuvm::GpuVm<VmInner>>,
+    owner: Arc<Mutex<gpuvm::UniqueRefGpuVm<VmInner>>>,
     uat_inner: Arc<UatInner>,
     prot: Prot,
     offset: usize,
@@ -639,11 +627,8 @@ impl KernelMapping {
     /// Remap a cached mapping as uncached, then synchronously flush that range of VAs from the
     /// coprocessor cache. This is required to safely unmap cached/private mappings.
     fn remap_uncached_and_flush(&mut self) {
-        let mut owner = self
-            .0
-            .owner
-            .exec_lock(None, false)
-            .expect("Failed to exec_lock in remap_uncached_and_flush");
+        let mut owner_guard = self.0.owner.lock();
+        let owner = owner_guard.data();
 
         mod_dev_dbg!(
             owner.dev,
@@ -797,11 +782,8 @@ impl Drop for KernelMapping {
             self.remap_uncached_and_flush();
         }
 
-        let mut owner = self
-            .0
-            .owner
-            .exec_lock(None, false)
-            .expect("exec_lock failed in KernelMapping::drop");
+        let mut owner_guard = self.0.owner.lock();
+        let owner = owner_guard.data();
         mod_dev_dbg!(
             owner.dev,
             "MMU: unmap {:#x}:{:#x}\n",
@@ -1040,28 +1022,31 @@ impl Vm {
         )?;
 
         let binding_clone = binding.clone();
+        let gpuvm = gpuvm::GpuVm::new::<Error, _>(
+            c_str!("Asahi::GpuVm"),
+            dev,
+            &*dummy_obj.gem,
+            gpuvm_range,
+            kernel_range,
+            VmInner {
+                dev: dev.into(),
+                va_range,
+                is_kernel,
+                page_table,
+                mm,
+                uat_inner,
+                binding: binding_clone,
+                id,
+            },
+        )?;
+        let gpuvm_ref = ARef::from(&*gpuvm);
+        let inner = Arc::pin_init(new_mutex!(gpuvm, "AsahiGpuVm"), GFP_KERNEL)?;
+
         Ok(Vm {
             id,
             dummy_obj: dummy_obj.gem.clone(),
-            inner: gpuvm::GpuVm::new(
-                c_str!("Asahi::GpuVm"),
-                // TODO: should we using DRM_GPUVM_RESV_PROTECTED as well?
-                drm_gpuvm_flags_DRM_GPUVM_IMMEDIATE_MODE,
-                dev,
-                dummy_obj.gem.clone(),
-                gpuvm_range,
-                kernel_range,
-                init!(VmInner {
-                    dev: dev.into(),
-                    va_range,
-                    is_kernel,
-                    page_table,
-                    mm,
-                    uat_inner,
-                    binding: binding_clone,
-                    id,
-                }),
-            )?,
+            inner,
+            gpuvm: gpuvm_ref,
             binding,
         })
     }
@@ -1083,18 +1068,19 @@ impl Vm {
         guard: bool,
     ) -> Result<KernelMapping> {
         let size = object_range.range();
-        let sgt = gem.owned_sg_table()?;
-        let mut inner = self.inner.exec_lock(Some(gem), false)?;
-        let vm_bo = self.inner.obtain_bo(gem)?;
+        let sgt = gem::owned_sg_table(gem)?;
+        let vm_bo = self.gpuvm.obtain(gem, VmBo::new())?;
+        let mut inner = self.inner.lock();
 
-        let mut vm_bo_guard = vm_bo.inner().inner.lock();
+        let mut vm_bo_guard = vm_bo.data().inner.lock();
         if vm_bo_guard.sgt.is_none() {
             vm_bo_guard.sgt.replace(sgt);
         }
         core::mem::drop(vm_bo_guard);
 
-        let uat_inner = inner.uat_inner.clone();
-        let node = inner.mm.insert_node_in_range(
+        let data = inner.data();
+        let uat_inner = data.uat_inner.clone();
+        let node = data.mm.insert_node_in_range(
             KernelMappingInner {
                 owner: self.inner.clone(),
                 uat_inner,
@@ -1112,8 +1098,8 @@ impl Vm {
             mm::InsertMode::Best,
         )?;
 
-        let ret = inner.map_node(&node, prot);
-        // Drop the exec_lock first, so that if map_node failed the
+        let ret = data.map_node(&node, prot);
+        // Drop the GPUVM lock first, so that if map_node failed the
         // KernelMappingInner destructur does not deadlock.
         core::mem::drop(inner);
         ret?;
@@ -1130,19 +1116,19 @@ impl Vm {
         prot: Prot,
         guard: bool,
     ) -> Result<KernelMapping> {
-        let sgt = gem.owned_sg_table()?;
-        let mut inner = self.inner.exec_lock(Some(&gem), false)?;
+        let sgt = gem::owned_sg_table(&gem)?;
+        let vm_bo = self.gpuvm.obtain(&gem, VmBo::new())?;
+        let mut inner = self.inner.lock();
 
-        let vm_bo = self.inner.obtain_bo(&gem)?;
-
-        let mut vm_bo_guard = vm_bo.inner().inner.lock();
+        let mut vm_bo_guard = vm_bo.data().inner.lock();
         if vm_bo_guard.sgt.is_none() {
             vm_bo_guard.sgt.replace(sgt);
         }
         core::mem::drop(vm_bo_guard);
 
-        let uat_inner = inner.uat_inner.clone();
-        let node = inner.mm.reserve_node(
+        let data = inner.data();
+        let uat_inner = data.uat_inner.clone();
+        let node = data.mm.reserve_node(
             KernelMappingInner {
                 owner: self.inner.clone(),
                 uat_inner,
@@ -1157,8 +1143,8 @@ impl Vm {
             0,
         )?;
 
-        let ret = inner.map_node(&node, prot);
-        // Drop the exec_lock first, so that if map_node failed the
+        let ret = data.map_node(&node, prot);
+        // Drop the GPUVM lock first, so that if map_node failed the
         // KernelMappingInner destructur does not deadlock.
         core::mem::drop(inner);
         ret?;
@@ -1178,18 +1164,21 @@ impl Vm {
     ) -> Result {
         // Mapping needs a complete context
         let mut ctx = StepContext {
-            new_va: Some(gpuvm::GpuVa::<VmInner>::new(pin_init::default())?),
-            prev_va: Some(gpuvm::GpuVa::<VmInner>::new(pin_init::default())?),
-            next_va: Some(gpuvm::GpuVa::<VmInner>::new(pin_init::default())?),
+            va_allocs: [
+                Some(gpuvm::GpuVaAlloc::<VmInner>::new(GFP_KERNEL)?),
+                Some(gpuvm::GpuVaAlloc::<VmInner>::new(GFP_KERNEL)?),
+                Some(gpuvm::GpuVaAlloc::<VmInner>::new(GFP_KERNEL)?),
+            ],
             prot,
+            single_page,
             ..Default::default()
         };
 
-        let vm_bo = self.inner.obtain_bo(gem)?;
+        let vm_bo = self.gpuvm.obtain(gem, VmBo::new())?;
         {
-            let mut vm_bo_guard = vm_bo.inner().inner.lock();
+            let mut vm_bo_guard = vm_bo.data().inner.lock();
             if vm_bo_guard.sgt.is_none() {
-                let sgt = gem.owned_sg_table()?;
+                let sgt = gem::owned_sg_table(gem)?;
 
                 if vm_bo_guard.sg_vec.is_none() {
                     let mut sg_vec = KVVec::new();
@@ -1207,16 +1196,14 @@ impl Vm {
             core::mem::drop(vm_bo_guard);
         }
 
-        let mut inner = self.inner.exec_lock(Some(gem), true)?;
+        let mut inner = self.inner.lock();
 
         // Preallocate the page tables, to fail early if we ENOMEM
-        inner.page_table.alloc_pages(addr..(addr + size))?;
-
-        ctx.vm_bo = Some(vm_bo);
+        inner.data().page_table.alloc_pages(addr..(addr + size))?;
 
         if (addr | size | offset) & (UAT_PGMSK as u64) != 0 {
             dev_err!(
-                inner.dev.as_ref(),
+                inner.data_ref().dev.as_ref(),
                 "MMU: Map step {:#x} [{:#x}] -> {:#x} is not page-aligned\n",
                 offset,
                 size,
@@ -1232,13 +1219,21 @@ impl Vm {
         };
 
         mod_dev_dbg!(
-            inner.dev,
+            inner.data_ref().dev,
             "MMU: sm_map: {:#x} [{:#x}] -> {:#x}\n",
             offset,
             size,
             addr
         );
-        inner.sm_map(&mut ctx, addr, size, offset, gem_range, flags)
+        inner.sm_map(gpuvm::OpMapRequest {
+            addr,
+            range: size,
+            gem_offset: offset,
+            gem_range,
+            flags,
+            vm_bo: &vm_bo,
+            context: &mut ctx,
+        })
     }
 
     /// Add a direct MMIO mapping to this Vm at a free address.
@@ -1249,11 +1244,11 @@ impl Vm {
         size: usize,
         prot: Prot,
     ) -> Result<KernelMapping> {
-        let mut inner = self.inner.exec_lock(None, false)?;
+        let mut inner = self.inner.lock();
 
         if (iova as usize | phys | size) & UAT_PGMSK != 0 {
             dev_err!(
-                inner.dev.as_ref(),
+                inner.data_ref().dev.as_ref(),
                 "MMU: KernelMapping {:#x}:{:#x} -> {:#x} is not page-aligned\n",
                 phys,
                 size,
@@ -1263,15 +1258,16 @@ impl Vm {
         }
 
         dev_info!(
-            inner.dev.as_ref(),
+            inner.data_ref().dev.as_ref(),
             "MMU: IO map: {:#x}:{:#x} -> {:#x}\n",
             phys,
             size,
             iova
         );
 
-        let uat_inner = inner.uat_inner.clone();
-        let node = inner.mm.reserve_node(
+        let data = inner.data();
+        let uat_inner = data.uat_inner.clone();
+        let node = data.mm.reserve_node(
             KernelMappingInner {
                 owner: self.inner.clone(),
                 uat_inner,
@@ -1286,13 +1282,13 @@ impl Vm {
             0,
         )?;
 
-        let ret = inner.page_table.map_pages(
+        let ret = data.page_table.map_pages(
             iova..(iova + size as u64),
             phys as PhysicalAddr,
             prot,
             false,
         );
-        // Drop the exec_lock first, so that if map_node failed the
+        // Drop the GPUVM lock first, so that if map_node failed the
         // KernelMappingInner destructur does not deadlock.
         core::mem::drop(inner);
         ret?;
@@ -1301,18 +1297,26 @@ impl Vm {
 
     /// Unmap everything in an address range.
     pub(crate) fn unmap_range(&self, iova: u64, size: u64) -> Result {
-        // Unmapping a range can only do a single split, so just preallocate
-        // the prev and next GpuVas
+        // An unmap can remap both boundary mappings. Each remap requires two
+        // allocations, but a one-sided remap returns the unused allocation.
         let mut ctx = StepContext {
-            prev_va: Some(gpuvm::GpuVa::<VmInner>::new(pin_init::default())?),
-            next_va: Some(gpuvm::GpuVa::<VmInner>::new(pin_init::default())?),
+            va_allocs: [
+                Some(gpuvm::GpuVaAlloc::<VmInner>::new(GFP_KERNEL)?),
+                Some(gpuvm::GpuVaAlloc::<VmInner>::new(GFP_KERNEL)?),
+                Some(gpuvm::GpuVaAlloc::<VmInner>::new(GFP_KERNEL)?),
+            ],
             ..Default::default()
         };
 
-        let mut inner = self.inner.exec_lock(None, false)?;
+        let mut inner = self.inner.lock();
 
-        mod_dev_dbg!(inner.dev, "MMU: sm_unmap: {:#x}:{:#x}\n", iova, size);
-        inner.sm_unmap(&mut ctx, iova, size)
+        mod_dev_dbg!(
+            inner.data_ref().dev,
+            "MMU: sm_unmap: {:#x}:{:#x}\n",
+            iova,
+            size
+        );
+        inner.sm_unmap(iova, size, &mut ctx)
     }
 
     /// Drop mappings for a given bo.
@@ -1320,13 +1324,12 @@ impl Vm {
         // Removing whole mappings only does unmaps, so no preallocated VAs
         let mut ctx = Default::default();
 
-        let inner = self.inner.exec_lock(Some(gem), false)?;
-
-        if let Some(bo) = self.inner.find_bo(gem) {
-            mod_dev_dbg!(inner.dev, "MMU: bo_unmap\n");
-            self.inner.bo_unmap(&mut ctx, &bo)?;
-            mod_dev_dbg!(inner.dev, "MMU: bo_unmap done\n");
-            // We need to drop the exec_lock first, then the GpuVmBo since that will take the lock itself.
+        if let Some(bo) = self.gpuvm.find(gem) {
+            let mut inner = self.inner.lock();
+            mod_dev_dbg!(inner.data_ref().dev, "MMU: bo_unmap\n");
+            inner.bo_unmap(&bo, &mut ctx)?;
+            mod_dev_dbg!(inner.data_ref().dev, "MMU: bo_unmap done\n");
+            // Drop the GPUVM lock first, then the GpuVmBo, whose final put may take GEM locks.
             core::mem::drop(inner);
             core::mem::drop(bo);
         }
@@ -1341,12 +1344,12 @@ impl Vm {
 
     /// Check whether an object is external to this GpuVm
     pub(crate) fn is_extobj(&self, gem: &gem::Object) -> bool {
-        self.inner.is_extobj(gem)
+        self.gpuvm.is_extobj(gem)
     }
 
     /// Check whether an object is external to this GpuVm
     pub(crate) fn bo_deferred_cleanup(&self) {
-        self.inner.bo_deferred_cleanup()
+        self.gpuvm.deferred_cleanup()
     }
 }
 
@@ -1530,8 +1533,9 @@ impl Uat {
     /// Creates the reference-counted inner data for a new `Uat` instance.
     #[inline(never)]
     fn make_inner(dev: &driver::AsahiDevice) -> Result<Arc<UatInner>> {
-        let handoff_rgn = Self::map_region(dev.as_ref(), c_str!("handoff"), HANDOFF_SIZE, true)?;
-        let ttbs_rgn = Self::map_region(dev.as_ref(), c_str!("ttbs"), SLOTS_SIZE, true)?;
+        let handoff_rgn =
+            Self::map_region(dev.as_ref().as_ref(), c_str!("handoff"), HANDOFF_SIZE, true)?;
+        let ttbs_rgn = Self::map_region(dev.as_ref().as_ref(), c_str!("ttbs"), SLOTS_SIZE, true)?;
 
         // SAFETY: The Handoff struct layout matches the firmware's view of memory at this address,
         // and the region is at least large enough per the size specified above.
@@ -1569,7 +1573,7 @@ impl Uat {
 
         let inner = Self::make_inner(dev)?;
 
-        let of_node = dev.as_ref().of_node().ok_or(EINVAL)?;
+        let of_node = dev.as_ref().as_ref().of_node().ok_or(EINVAL)?;
         let res = of_node.reserved_mem_region_to_resource_byname(c_str!("pagetables"))?;
         let ttb1 = res.start();
         let ttb1size: usize = res.size().try_into()?;

@@ -15,6 +15,7 @@ use kernel::{
     io::{
         mem::IoMem, //
         Io,
+        IoBase,
     },
     platform,
     prelude::*,
@@ -154,14 +155,14 @@ pub(crate) struct FaultInfo {
 /// Device resources for this GPU instance.
 pub(crate) struct Resources {
     dev: ARef<platform::Device>,
-    sgx: Pin<KBox<Devres<IoMem<SGX_SIZE>>>>,
+    sgx: Devres<IoMem<'static, SGX_SIZE>>,
 }
 
 impl Resources {
     /// Map the required resources given our platform device.
-    pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Resources> {
+    pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Resources> {
         let sgx_req = pdev.io_request_by_name(c_str!("sgx")).ok_or(EINVAL)?;
-        let sgx_iomem = KBox::pin_init(sgx_req.iomap_sized::<SGX_SIZE>(), GFP_KERNEL)?;
+        let sgx_iomem = sgx_req.iomap_sized::<SGX_SIZE>()?.into_devres()?;
 
         Ok(Resources {
             // SAFETY: This device does DMA via the UAT IOMMU.
@@ -172,7 +173,7 @@ impl Resources {
 
     fn sgx_read32<const OFF: usize>(&self) -> u32 {
         if let Some(sgx) = self.sgx.try_access() {
-            sgx.relaxed().read32(OFF)
+            (&*sgx).as_view().relaxed().read32(OFF)
         } else {
             0
         }
@@ -188,7 +189,9 @@ impl Resources {
 
     fn sgx_read64<const OFF: usize>(&self) -> u64 {
         if let Some(sgx) = self.sgx.try_access() {
-            sgx.relaxed().read64(OFF)
+            // `Region` only promises four-byte base alignment. Use the checked accessor so the
+            // actual eight-byte alignment of this MMIO mapping is validated at runtime.
+            (&*sgx).as_view().relaxed().try_read64(OFF).unwrap_or(0)
         } else {
             0
         }
@@ -210,10 +213,10 @@ impl Resources {
     }
 
     /// Start the ASC coprocessor CPU.
-    pub(crate) fn start_cpu(pdev: &platform::Device<Core>) -> Result {
+    pub(crate) fn start_cpu(pdev: &platform::Device<Core<'_>>) -> Result {
         let asc_req = pdev.io_request_by_name(c_str!("asc")).ok_or(EINVAL)?;
-        let asc_iomem = KBox::pin_init(asc_req.iomap_sized::<ASC_CTL_SIZE>(), GFP_KERNEL)?;
-        let res = asc_iomem.access(pdev.as_ref())?.relaxed();
+        let asc_iomem = asc_req.iomap_sized::<ASC_CTL_SIZE>()?;
+        let res = (&asc_iomem).as_view().relaxed();
 
         let val = res.read32(CPU_CONTROL);
         res.write32(val | CPU_RUN, CPU_CONTROL);

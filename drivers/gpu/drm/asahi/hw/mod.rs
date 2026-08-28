@@ -465,7 +465,7 @@ impl PwrConfig {
     ) -> Result<KVec<PState>> {
         let mut perf_states = KVec::new();
 
-        let node = dev.as_ref().of_node().ok_or(EIO)?;
+        let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
         let opps = node.parse_phandle(name, 0).ok_or(EIO)?;
 
         for opp in opps.children() {
@@ -518,7 +518,7 @@ impl PwrConfig {
     /// Load the GPU power configuration from the device tree.
     pub(crate) fn load(dev: &AsahiDevice, cfg: &HwConfig) -> Result<PwrConfig> {
         let perf_states = Self::load_opp(dev, c_str!("operating-points-v2"), cfg, true)?;
-        let node = dev.as_ref().of_node().ok_or(EIO)?;
+        let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
 
         macro_rules! prop {
             ($prop:expr, $default:expr) => {{
