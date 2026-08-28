@@ -5,8 +5,7 @@
 //! C header: [`include/drm/drm_gem.h`](srctree/include/drm/drm_gem.h)
 
 use crate::{
-    bindings,
-    dma_buf,
+    bindings, dma_buf,
     drm::{
         self,
         device::{
@@ -89,7 +88,7 @@ pub type DriverAllocImpl<T> = <<T as DriverObject>::Driver as drm::Driver>::Obje
 
 /// GEM object functions, which must be implemented by drivers.
 #[vtable]
-pub trait DriverObject: Sync + Send + Sized {
+pub trait DriverObject: Sync + Send + Sized + 'static {
     /// Parent `Driver` for this object.
     type Driver: drm::Driver;
 

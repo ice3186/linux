@@ -79,6 +79,7 @@ unsafe impl<T: Driver> driver::RegistrationOps for Adapter<T> {
             (*pdrv.get()).remove = Some(Self::remove_callback);
             (*pdrv.get()).driver.of_match_table = of_table;
             (*pdrv.get()).driver.acpi_match_table = acpi_table;
+            (*pdrv.get()).driver.suppress_bind_attrs = T::SUPPRESS_BIND_ATTRS;
         }
 
         // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
@@ -217,6 +218,9 @@ pub trait Driver {
 
     /// The type of the driver's bus device private data.
     type Data<'bound>: Send + 'bound;
+
+    /// Whether to suppress the driver's sysfs `bind` and `unbind` attributes.
+    const SUPPRESS_BIND_ATTRS: bool = false;
 
     /// The table of OF device ids supported by the driver.
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = None;

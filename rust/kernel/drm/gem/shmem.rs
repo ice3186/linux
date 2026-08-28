@@ -27,9 +27,11 @@ use crate::{
         to_result, //
     },
     io::{
-        Io,
-        IoCapable,
-        IoKnownSize, //
+        IoBase,
+        IoSysMap,
+        Region,
+        SysMem,
+        SysMemBackend, //
     },
     prelude::*,
     scatterlist,
@@ -299,6 +301,25 @@ impl<T: DriverObject> Object<T> {
         Ok(sgt_res.access(dev)?)
     }
 
+    /// Returns a compatibility reference to this object's scatter-gather table.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that [`Object::sg_table`] is never called for this object and that
+    /// the driver cannot unbind while the returned table exists. In particular, the owned GEM
+    /// reference does not prevent a device-managed [`SGTableMap`] from revoking the table.
+    pub unsafe fn owned_sg_table_unchecked(&self) -> Result<SGTable<T>> {
+        // SAFETY: `drm_gem_shmem_get_pages_sgt` is thread-safe and returns either an error pointer
+        // or the scatter-gather table owned by this GEM object.
+        let sgt =
+            from_err_ptr(unsafe { bindings::drm_gem_shmem_get_pages_sgt(self.as_raw_shmem()) })?;
+
+        Ok(SGTable {
+            sgt: NonNull::new(sgt).ok_or(ENOMEM)?,
+            _owner: self.into(),
+        })
+    }
+
     /// Create a new shmem-backed DRM object of the given size.
     ///
     /// Additional config options can be specified using `config`.
@@ -458,6 +479,29 @@ where
     pub fn owner(&self) -> &Object<D> {
         &self.owner
     }
+
+    /// Returns a system-memory view covering this entire mapping.
+    #[inline]
+    pub fn get(&self) -> IoSysMap<'_, [u8]> {
+        let ptr = core::ptr::slice_from_raw_parts_mut(self.addr.cast(), self.owner.size());
+
+        // SAFETY: `VMap` keeps the GEM object and its kernel mapping alive, and the slice length is
+        // the mapped GEM object's size.
+        IoSysMap::Sys(unsafe { SysMem::new(ptr) })
+    }
+
+    /// Returns a mutable raw pointer to the start of this mapping.
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.addr
+    }
+
+    /// Fills this entire mapping with `value`.
+    #[inline]
+    pub fn memset(&mut self, value: u8) {
+        // SAFETY: `VMap` guarantees that the mapping covers `owner.size()` writable bytes.
+        unsafe { bindings::memset(self.addr, value.into(), self.owner.size()) };
+    }
 }
 
 impl<D, R, const SIZE: usize> Drop for VMap<D, R, SIZE>
@@ -480,6 +524,30 @@ where
     }
 }
 
+/// A compatibility reference to a scatter-gather table for a GEM shmem object.
+///
+/// Instances can only be constructed by a caller that guarantees the table cannot be revoked by
+/// the device-managed [`Object::sg_table`] path during this object's lifetime.
+pub struct SGTable<T: DriverObject> {
+    sgt: NonNull<bindings::sg_table>,
+    _owner: ARef<Object<T>>,
+}
+
+impl<T: DriverObject> Deref for SGTable<T> {
+    type Target = scatterlist::SGTable;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `sgt` came from `drm_gem_shmem_get_pages_sgt`; the construction invariant says
+        // it cannot be revoked, and `_owner` keeps the containing GEM object alive.
+        unsafe { scatterlist::SGTable::from_raw(self.sgt.as_ptr()) }
+    }
+}
+
+// SAFETY: The scatter-gather table is immutable while held and the GEM object is thread-safe.
+unsafe impl<T: DriverObject> Send for SGTable<T> {}
+// SAFETY: The scatter-gather table is immutable while held and the GEM object is thread-safe.
+unsafe impl<T: DriverObject> Sync for SGTable<T> {}
+
 // SAFETY: `addr` points to a valid memory address for as long as `owner` exists, meaning that so
 // long as `owner` is `Send` so is `VMap`.
 unsafe impl<D, R, const SIZE: usize> Send for VMap<D, R, SIZE>
@@ -498,65 +566,23 @@ where
 {
 }
 
-impl<D, R, const SIZE: usize> Io for VMap<D, R, SIZE>
+impl<'a, D, R, const SIZE: usize> IoBase<'a> for &'a VMap<D, R, SIZE>
 where
     D: DriverObject,
     R: Deref<Target = Object<D>>,
 {
-    #[inline]
-    fn addr(&self) -> usize {
-        self.addr as usize
-    }
+    type Backend = SysMemBackend;
+    type Target = Region<SIZE>;
 
     #[inline]
-    fn maxsize(&self) -> usize {
-        self.owner.size()
+    fn as_view(self) -> SysMem<'a, Region<SIZE>> {
+        let ptr = Region::ptr_from_raw_parts_mut(self.addr.cast(), self.owner.size());
+
+        // SAFETY: `VMap` guarantees that `addr` points to a valid kernel-accessible mapping for
+        // its lifetime. `make_vmap` verifies the minimum size, and GEM object sizes are page-sized.
+        unsafe { SysMem::new(ptr) }
     }
 }
-
-impl<D, R, const SIZE: usize> IoKnownSize for VMap<D, R, SIZE>
-where
-    D: DriverObject,
-    R: Deref<Target = Object<D>>,
-{
-    const MIN_SIZE: usize = SIZE;
-}
-
-macro_rules! impl_vmap_io_capable {
-    ($ty:ty) => {
-        impl<D, R, const SIZE: usize> IoCapable<$ty> for VMap<D, R, SIZE>
-        where
-            D: DriverObject,
-            R: Deref<Target = Object<D>>,
-        {
-            #[inline]
-            unsafe fn io_read(&self, address: usize) -> $ty {
-                let ptr = address as *mut $ty;
-
-                // SAFETY: The safety contract of `io_read` guarantees that address is a valid
-                // address within the bounds of `Self` of at least the size of $ty, and is properly
-                // aligned.
-                unsafe { ptr::read_volatile(ptr) }
-            }
-
-            #[inline]
-            unsafe fn io_write(&self, value: $ty, address: usize) {
-                let ptr = address as *mut $ty;
-
-                // SAFETY: The safety contract of `io_write` guarantees that address is a valid
-                // address within the bounds of `Self` of at least the size of $ty, and is properly
-                // aligned.
-                unsafe { ptr::write_volatile(ptr, value) }
-            }
-        }
-    };
-}
-
-impl_vmap_io_capable!(u8);
-impl_vmap_io_capable!(u16);
-impl_vmap_io_capable!(u32);
-#[cfg(CONFIG_64BIT)]
-impl_vmap_io_capable!(u64);
 
 /// A reference to a GEM object that is known to have a mapped [`SGTable`].
 ///
