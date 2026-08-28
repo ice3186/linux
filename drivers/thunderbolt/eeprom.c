@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/property.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include "tb.h"
 
 /*
@@ -216,6 +217,7 @@ static u32 tb_crc32(void *data, size_t len)
 
 #define TB_DROM_DATA_START		13
 #define TB_DROM_HEADER_SIZE		22
+#define TB_DROM_PROPERTY_MAX_PADDING	3
 #define USB4_DROM_HEADER_SIZE		16
 
 struct tb_drom_header {
@@ -489,7 +491,12 @@ static int tb_drom_copy_property(struct tb_switch *sw, const char *name, u16 *si
 
 	*size = ((struct tb_drom_header *)sw->drom)->data_len +
 							  TB_DROM_DATA_START;
-	if (*size > len)
+	/*
+	 * Firmware may pad byte-array properties to a 32-bit boundary. Keep the
+	 * DROM header authoritative, but only tolerate a zero-filled padding tail.
+	 */
+	if (*size > len || len - *size > TB_DROM_PROPERTY_MAX_PADDING ||
+	    memchr_inv(sw->drom + *size, 0, len - *size))
 		goto err;
 
 	return 0;
