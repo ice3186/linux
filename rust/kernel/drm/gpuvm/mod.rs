@@ -17,7 +17,7 @@ use kernel::{
     },
     bindings,
     drm,
-    drm::gem::IntoGEMObject,
+    drm::gem::{BaseObject, IntoGEMObject},
     error::to_result,
     prelude::*,
     sync::aref::{
@@ -215,6 +215,21 @@ impl<T: DriverGpuVm> GpuVm<T> {
         data: impl PinInit<T::VmBoData>,
     ) -> Result<ARef<GpuVmBo<T>>, AllocError> {
         Ok(GpuVmBoAlloc::new(self, obj, data)?.obtain())
+    }
+
+    /// Look up the [`GpuVmBo`] for this GEM object, if one exists.
+    #[inline]
+    pub fn find(&self, obj: &T::Object) -> Option<ARef<GpuVmBo<T>>> {
+        obj.lock_gpuva();
+        // SAFETY: The GPUVA lock is held and both pointers remain valid for this call.
+        let ptr = unsafe { bindings::drm_gpuvm_bo_find(self.as_raw(), obj.as_raw()) };
+        obj.unlock_gpuva();
+
+        // CAST: `drm_gpuvm_bo` is the first field of the repr(C) `GpuVmBo<T>`.
+        let ptr = NonNull::new(ptr.cast::<GpuVmBo<T>>())?;
+        // SAFETY: `drm_gpuvm_bo_find` returns an owned reference to an initialized BO that remains
+        // in the GEM list.
+        Some(unsafe { ARef::from_raw(ptr) })
     }
 
     /// Clean up buffer objects that are no longer used.

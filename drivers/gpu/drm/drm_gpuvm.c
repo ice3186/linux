@@ -2368,6 +2368,7 @@ op_map_cb(const struct drm_gpuvm_ops *fn, void *priv,
 	op.map.va.range = req->map.va.range;
 	op.map.gem.obj = req->map.gem.obj;
 	op.map.gem.offset = req->map.gem.offset;
+	op.map.gem.range = req->map.gem.range;
 	op.map.flags = req->map.flags;
 
 	return fn->sm_step_map(&op, priv);
@@ -2424,7 +2425,7 @@ static bool __can_merge(struct drm_gpuvm *gpuvm, const struct drm_gpuva_op_map *
 	if (a->gem.obj != b->gem.obj || !a->gem.obj)
 		return false;
 
-	if (can_merge_flags(gpuvm, a->flags, b->flags))
+	if (!can_merge_flags(gpuvm, a->flags, b->flags))
 		return false;
 
 	/* Order VAs for the rest of the checks. */
@@ -2470,6 +2471,7 @@ static bool can_merge(struct drm_gpuvm *gpuvm, const struct drm_gpuva *a,
 		.va.addr = a->va.addr,
 		.va.range = a->va.range,
 		.gem.offset = a->gem.offset,
+		.gem.range = a->gem.range,
 		.gem.obj = a->gem.obj,
 		.flags = a->flags,
 	};
@@ -2487,7 +2489,7 @@ static int validate_map_request(struct drm_gpuvm *gpuvm,
 		u64 va_range = req->va.range;
 
 		/* For a repeated mapping, GEM range must be > 0
-		 * and a multiple of the VA range.
+		 * and the VA range must be a multiple of it.
 		 */
 		if (unlikely(!req->gem.range ||
 			     va_range < req->gem.range ||
@@ -2724,7 +2726,7 @@ __drm_gpuvm_sm_unmap(struct drm_gpuvm *gpuvm,
 			next.va.addr = req_end;
 			next.va.range = end - req_end;
 			next.gem.obj = obj;
-			prev.gem.range = va->gem.range;
+			next.gem.range = va->gem.range;
 			next.gem.offset = offset +
 				(va->flags & DRM_GPUVA_REPEAT ? 0 : req_end - addr);
 			next.flags = va->flags;
@@ -3286,7 +3288,7 @@ drm_gpuvm_bo_unmap(struct drm_gpuvm_bo *vm_bo, void *priv)
 {
 	struct drm_gpuva_ops *ops;
 	struct drm_gpuva_op *op;
-	int ret;
+	int ret = 0;
 
 	if (unlikely(!vm_bo->vm))
 		return -EINVAL;

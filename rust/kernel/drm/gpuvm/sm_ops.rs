@@ -19,6 +19,22 @@ struct SmMapData<'a, 'ctx, T: DriverGpuVm> {
     vm_bo: &'a GpuVmBo<T>,
 }
 
+/// Flags stored with a GPU virtual-address mapping.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct GpuVaFlags(bindings::drm_gpuva_flags);
+
+impl GpuVaFlags {
+    /// No flags.
+    pub const NONE: Self = Self(0);
+
+    /// Repeat `gem_range` until the whole virtual-address range is covered.
+    pub const REPEAT: Self = Self(bindings::drm_gpuva_flags_DRM_GPUVA_REPEAT);
+
+    fn as_raw(self) -> bindings::drm_gpuva_flags {
+        self.0
+    }
+}
+
 /// The argument for [`UniqueRefGpuVm::sm_map`].
 pub struct OpMapRequest<'a, 'ctx, T: DriverGpuVm + 'ctx> {
     /// Address in GPU virtual address space.
@@ -27,6 +43,10 @@ pub struct OpMapRequest<'a, 'ctx, T: DriverGpuVm + 'ctx> {
     pub range: u64,
     /// Offset in GEM object.
     pub gem_offset: u64,
+    /// Length of the GEM range to repeat, or zero for a normal mapping.
+    pub gem_range: u32,
+    /// Flags stored with the GPUVA.
+    pub flags: GpuVaFlags,
     /// The GEM object to map.
     pub vm_bo: &'a GpuVmBo<T>,
     /// The user-provided context type.
@@ -44,9 +64,9 @@ impl<'a, 'ctx, T: DriverGpuVm> OpMapRequest<'a, 'ctx, T> {
                 gem: bindings::drm_gpuva_op_map__bindgen_ty_2 {
                     offset: self.gem_offset,
                     obj: self.vm_bo.obj().as_raw(),
-                    range: 0, // FIXME
+                    range: self.gem_range,
                 },
-                flags: 0,
+                flags: self.flags.as_raw(),
             },
         }
     }
@@ -361,6 +381,24 @@ impl<T: DriverGpuVm> UniqueRefGpuVm<T> {
         // * raw_request() creates a valid request.
         // * The private data is a valid SmData.
         to_result(unsafe { bindings::drm_gpuvm_sm_unmap(gpuvm, (&raw mut p).cast(), addr, length) })
+    }
+
+    /// Remove every mapping associated with a GPUVM BO.
+    #[inline]
+    pub fn bo_unmap(&mut self, bo: &GpuVmBo<T>, context: &mut T::SmContext<'_>) -> Result {
+        if bo.gpuvm() != &**self {
+            return Err(EINVAL);
+        }
+
+        let mut p = SmData {
+            gpuvm: self,
+            user_context: context,
+        };
+        // SAFETY:
+        // * The BO belongs to this GPUVM, as checked above.
+        // * The private data is a valid `SmData` for the duration of the callbacks.
+        // * Immediate-mode GPUVM takes the GEM GPUVA lock internally.
+        to_result(unsafe { bindings::drm_gpuvm_bo_unmap(bo.as_raw(), (&raw mut p).cast()) })
     }
 }
 

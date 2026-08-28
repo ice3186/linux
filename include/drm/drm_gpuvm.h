@@ -907,10 +907,10 @@ struct drm_gpuva_op_map {
 		 * @gem.range: the range of the GEM that is mapped
 		 *
 		 * When dealing with normal mappings, this must be zero.
-		 * When flags has DRM_GPUVA_REPEAT set, it must be a multiple
-		 * of va.range. This is a u32 not a u64 because we expect
-		 * repeated mappings to be pointing to a relatively small
-		 * portion of a GEM object.
+		 * When flags has DRM_GPUVA_REPEAT set, it must not exceed
+		 * va.range and va.range must be a multiple of it. This is a u32
+		 * not a u64 because we expect repeated mappings to be pointing
+		 * to relatively small portions of a GEM object.
 		 */
 		u32 range;
 
@@ -1165,6 +1165,7 @@ static inline void drm_gpuva_init_from_op(struct drm_gpuva *va,
 	va->va.range = op->va.range;
 	va->gem.obj = op->gem.obj;
 	va->gem.offset = op->gem.offset;
+	va->gem.range = op->gem.range;
 }
 
 /**

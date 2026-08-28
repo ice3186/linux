@@ -19,6 +19,13 @@ pub struct GpuVmBo<T: DriverGpuVm> {
     data: T::VmBoData,
 }
 
+// SAFETY: The C GPUVM BO is refcounted and may move between threads. Driver data must be sendable.
+unsafe impl<T: DriverGpuVm> Send for GpuVmBo<T> where T::VmBoData: Send {}
+
+// SAFETY: Shared access to the wrapper only exposes shared access to driver data and C GPUVM
+// operations that provide their own synchronization.
+unsafe impl<T: DriverGpuVm> Sync for GpuVmBo<T> where T::VmBoData: Sync {}
+
 // SAFETY: By type invariants, the allocation is managed by the refcount in `self.inner`.
 unsafe impl<T: DriverGpuVm> AlwaysRefCounted for GpuVmBo<T> {
     fn inc_ref(&self) {
