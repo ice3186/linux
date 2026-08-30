@@ -381,12 +381,61 @@ static void apple_nhi_ring_configure(struct tb_ring *ring, u32 flags, u32 e2e_fl
 	writel(flags | e2e_flags, options);
 }
 
+/*
+ * Experimental lifecycle tracing only. These callbacks deliberately do not
+ * touch DCP, ATC PHY, display-crossbar, or device-tree state. T602x DPIN
+ * register programming is not understood well enough to enable a route.
+ */
+static int apple_nhi_dp_tunnel_prepare(struct tb_nhi *nhi, struct tb_port *in,
+				       struct tb_port *out)
+{
+	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+
+	dev_info(anhi->dev,
+		 "experimental DP source prepare %llx:%u -> %llx:%u (trace only)\n",
+		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+	return 0;
+}
+
+static int apple_nhi_dp_tunnel_enable(struct tb_nhi *nhi, struct tb_port *in,
+				      struct tb_port *out)
+{
+	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+
+	dev_info(anhi->dev,
+		 "experimental DP source enable %llx:%u -> %llx:%u (no video side effects)\n",
+		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+	return 0;
+}
+
+static void apple_nhi_dp_tunnel_disable(struct tb_nhi *nhi, struct tb_port *in,
+					struct tb_port *out)
+{
+	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+
+	dev_info(anhi->dev, "experimental DP source disable %llx:%u -> %llx:%u\n",
+		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+}
+
+static void apple_nhi_dp_tunnel_unprepare(struct tb_nhi *nhi, struct tb_port *in,
+					  struct tb_port *out)
+{
+	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+
+	dev_info(anhi->dev, "experimental DP source unprepare %llx:%u -> %llx:%u\n",
+		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+}
+
 static const struct tb_nhi_ops apple_nhi_ops = {
 	.request_ring_irq = apple_nhi_request_irq,
 	.release_ring_irq = apple_nhi_release_irq,
 	.ring_interrupt_active = apple_nhi_ring_interrupt_active,
 	.ring_interrupt_mask = apple_nhi_ring_interrupt_mask,
 	.ring_configure = apple_nhi_ring_configure,
+	.dp_tunnel_prepare = apple_nhi_dp_tunnel_prepare,
+	.dp_tunnel_enable = apple_nhi_dp_tunnel_enable,
+	.dp_tunnel_disable = apple_nhi_dp_tunnel_disable,
+	.dp_tunnel_unprepare = apple_nhi_dp_tunnel_unprepare,
 };
 
 static const struct tb_nhi_ring_layout apple_nhi_ring_layout = {
