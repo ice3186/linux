@@ -66,6 +66,8 @@ enum tb_tunnel_state {
  * @dprx_canceled: Was DPRX capabilities read poll canceled
  * @dprx_timeout: If set DPRX capabilities read poll work will timeout after this passes
  * @dprx_work: Worker that is scheduled to poll completion of DPRX capabilities read
+ * @dp_source_prepared: Platform DP source prepare hook completed
+ * @dp_source_enabled: Platform DP source enable hook completed
  * @callback: Callback called when DP tunnel is fully activated
  * @paths: All paths required by the tunnel
  */
@@ -103,6 +105,8 @@ struct tb_tunnel {
 	bool dprx_canceled;
 	ktime_t dprx_timeout;
 	struct delayed_work dprx_work;
+	bool dp_source_prepared;
+	bool dp_source_enabled;
 	void (*callback)(struct tb_tunnel *tunnel);
 
 	struct tb_path *paths[] __counted_by(npaths);
