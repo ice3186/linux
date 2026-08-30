@@ -575,6 +575,8 @@ static void apple_cio_stop(struct apple_cio *acio)
 	int ret, i;
 
 	lockdep_assert_held(&acio->lock);
+	dev_info(acio->dev, "stopping ACIO: current cable info 0x%x, target 0x%x\n",
+		 acio->current_cable_info, acio->target_cable_info);
 
 	/*
 	 * First, shutdown the blocks inside the ACIO complex, like the NHI and the IOMMU.
@@ -582,6 +584,7 @@ static void apple_cio_stop(struct apple_cio *acio)
 	 * the MMIO space of these so make sure nothing tries to do just that.
 	 */
 	of_platform_depopulate(acio->dev);
+	dev_info(acio->dev, "ACIO child devices stopped\n");
 
 	/* Try to shut down and power off the co-processor gracefully */
 	ret = apple_rtkit_poweroff(acio->rtk);
@@ -589,6 +592,7 @@ static void apple_cio_stop(struct apple_cio *acio)
 		dev_warn(acio->dev,
 			 "Failed to shutdown M3 RTKit, continuing ACIO shutdown anyway\n");
 	apple_rtkit_free(acio->rtk);
+	dev_info(acio->dev, "ACIO RTKit stopped\n");
 
 	/* Finally, remove the links to the PD domains to power everything off */
 	for (i = 0; i < acio->pd_list->num_pds; i++) {
@@ -598,6 +602,7 @@ static void apple_cio_stop(struct apple_cio *acio)
 	}
 
 	acio->current_cable_info = 0;
+	dev_info(acio->dev, "ACIO stopped\n");
 }
 
 static int apple_cio_start(struct apple_cio *acio)
