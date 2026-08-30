@@ -549,8 +549,10 @@ static void apple_nhi_remove(struct platform_device *pdev)
 {
 	struct apple_nhi *anhi = platform_get_drvdata(pdev);
 
+	dev_info(anhi->dev, "removing Thunderbolt domain\n");
 	tb_domain_remove(anhi->tb);
 	wait_for_completion(&anhi->nhi.domain_released);
+	dev_info(anhi->dev, "Thunderbolt domain released\n");
 }
 
 static const struct of_device_id apple_nhi_match[] = {
