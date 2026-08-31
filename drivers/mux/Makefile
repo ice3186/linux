@@ -9,6 +9,7 @@ mux-adgs1408-objs		:= adgs1408.o
 mux-gpio-objs			:= gpio.o
 mux-mmio-objs			:= mmio.o
 mux-apple-display-crossbar-objs	:= apple-display-crossbar.o
+CFLAGS_apple-display-crossbar.o	:= -I$(src)
 
 obj-$(CONFIG_MULTIPLEXER)	+= mux-core.o
 obj-$(CONFIG_MUX_ADG792A)	+= mux-adg792a.o

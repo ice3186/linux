@@ -18,6 +18,9 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 
+#define CREATE_TRACE_POINTS
+#include "apple_dpxbar_trace.h"
+
 /*
  * T602x register interface is cleary different so most of the names below are
  * probably wrong.
@@ -102,10 +105,13 @@ struct apple_dpxbar {
 static inline void dpxbar_mask32(struct apple_dpxbar *xbar, u32 reg, u32 mask,
 				 u32 set)
 {
-	u32 value = readl(xbar->regs + reg);
+	u32 old = readl(xbar->regs + reg);
+	u32 value = old;
+
 	value &= ~mask;
 	value |= set;
 	writel(value, xbar->regs + reg);
+	trace_apple_dpxbar_rmw(xbar, reg, old, mask, set, value);
 }
 
 static inline void dpxbar_set32(struct apple_dpxbar *xbar, u32 reg, u32 set)
@@ -126,6 +132,7 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 	unsigned int mux_state;
 	unsigned int dispext_bit;
 	unsigned int dispext_bit_en;
+	int selected_before;
 	bool enable;
 	int ret = 0;
 
@@ -143,10 +150,13 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 		mux_state = state;
 		enable = true;
 	} else {
+		trace_apple_dpxbar_route(dev_name(dpxbar->dev), index, state,
+					 -2, -2, -EINVAL);
 		return -EINVAL;
 	}
 
 	spin_lock_irqsave(&dpxbar->lock, flags);
+	selected_before = dpxbar->selected_dispext[index];
 
 	/* ensure the selected dispext isn't already used in this crossbar */
 	if (enable) {
@@ -155,6 +165,10 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 				continue;
 			if (dpxbar->selected_dispext[i] == state) {
 				spin_unlock_irqrestore(&dpxbar->lock, flags);
+				trace_apple_dpxbar_route(dev_name(dpxbar->dev),
+							 index, state,
+							 selected_before,
+							 selected_before, -EBUSY);
 				return -EBUSY;
 			}
 		}
@@ -207,8 +221,9 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 
 		dpxbar->selected_dispext[index] = state;
 	}
-
 	spin_unlock_irqrestore(&dpxbar->lock, flags);
+	trace_apple_dpxbar_route(dev_name(dpxbar->dev), index, state,
+				 selected_before, enable ? state : -1, 0);
 
 	if (enable)
 		dev_info(dpxbar->dev, "Switched %s to dispext%u,%u\n",
@@ -230,6 +245,7 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 	unsigned int dispext_bit;
 	unsigned int dispext_bit_en;
 	unsigned int atc_bit;
+	int selected_before;
 	bool enable;
 	int ret = 0;
 	u32 mux_mask, mux_set;
@@ -248,6 +264,8 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		mux_state = state;
 		enable = true;
 	} else {
+		trace_apple_dpxbar_route(dev_name(dpxbar->dev), index, state,
+					 -2, -2, -EINVAL);
 		return -EINVAL;
 	}
 
@@ -277,10 +295,13 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		atc_bit = ATC_DPIN1;
 		break;
 	default:
+		trace_apple_dpxbar_route(dev_name(dpxbar->dev), index, state,
+					 -2, -2, -EINVAL);
 		return -EINVAL;
 	}
 
 	spin_lock_irqsave(&dpxbar->lock, flags);
+	selected_before = dpxbar->selected_dispext[index];
 
 	/* ensure the selected dispext isn't already used in this crossbar */
 	if (enable) {
@@ -289,6 +310,10 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 				continue;
 			if (dpxbar->selected_dispext[i] == state) {
 				spin_unlock_irqrestore(&dpxbar->lock, flags);
+				trace_apple_dpxbar_route(dev_name(dpxbar->dev),
+							 index, state,
+							 selected_before,
+							 selected_before, -EBUSY);
 				return -EBUSY;
 			}
 		}
@@ -342,8 +367,9 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 
 		dpxbar->selected_dispext[index] = state;
 	}
-
 	spin_unlock_irqrestore(&dpxbar->lock, flags);
+	trace_apple_dpxbar_route(dev_name(dpxbar->dev), index, state,
+				 selected_before, enable ? state : -1, 0);
 
 	if (enable)
 		dev_info(dpxbar->dev, "Switched %s to dispext%u,%u\n",
