@@ -4,6 +4,8 @@
 #include <linux/phy/phy.h>
 #include <linux/mux/consumer.h>
 
+#include "dptx-transport.h"
+
 enum dptx_apcall {
 	DPTX_APCALL_ACTIVATE = 0,
 	DPTX_APCALL_DEACTIVATE = 1,
@@ -32,18 +34,6 @@ enum dptx_apcall {
 	DPTX_APCALL_DEVICE_NOT_STARTED = 24,
 };
 
-#define DCPDPTX_REMOTE_PORT_CORE GENMASK(3, 0)
-#define DCPDPTX_REMOTE_PORT_ATC GENMASK(7, 4)
-#define DCPDPTX_REMOTE_PORT_DIE GENMASK(11, 8)
-#define DCPDPTX_REMOTE_PORT_CONNECTED BIT(15)
-
-enum dptx_link_rate {
-	LINK_RATE_RBR = 0x06,
-	LINK_RATE_HBR = 0x0a,
-	LINK_RATE_HBR2 = 0x14,
-	LINK_RATE_HBR3 = 0x1e,
-};
-
 struct apple_epic_service;
 
 struct dptx_port {
@@ -58,6 +48,7 @@ struct dptx_port {
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
+	struct apple_dptx_transport transport;
 };
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
