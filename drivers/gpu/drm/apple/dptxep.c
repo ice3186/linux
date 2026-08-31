@@ -338,8 +338,16 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	reply->retcode = cpu_to_le32(retcode);
 	reply->lane_count = cpu_to_le64(lane_count);
 
-	if (lane_count > 0)
-		complete(&dptx->linkcfg_completion);
+	if (lane_count > 0) {
+		unsigned long flags;
+		bool wake;
+
+		spin_lock_irqsave(&dptx->attempt_lock, flags);
+		wake = apple_dptx_attempt_link_configured(&dptx->attempt);
+		spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+		if (wake)
+			complete(&dptx->linkcfg_completion);
+	}
 
 	return ret;
 }
@@ -596,6 +604,24 @@ int dptxep_init(struct apple_dcp *dcp)
 	init_completion(&dcp->dptxport[1].enable_completion);
 	init_completion(&dcp->dptxport[0].linkcfg_completion);
 	init_completion(&dcp->dptxport[1].linkcfg_completion);
+	init_completion(&dcp->dptxport[0].connect_idle);
+	init_completion(&dcp->dptxport[1].connect_idle);
+	complete_all(&dcp->dptxport[0].connect_idle);
+	complete_all(&dcp->dptxport[1].connect_idle);
+	spin_lock_init(&dcp->dptxport[0].attempt_lock);
+	spin_lock_init(&dcp->dptxport[1].attempt_lock);
+	apple_dptx_attempt_init(&dcp->dptxport[0].attempt);
+	apple_dptx_attempt_init(&dcp->dptxport[1].attempt);
+	dcp->dptxport[0].connect_inflight = false;
+	dcp->dptxport[1].connect_inflight = false;
+	dcp->dptxport[0].cleanup_owned = false;
+	dcp->dptxport[1].cleanup_owned = false;
+	dcp->dptxport[0].shutting_down = false;
+	dcp->dptxport[1].shutting_down = false;
+	dcp->dptxport[0].connected = false;
+	dcp->dptxport[1].connected = false;
+	dcp->dptxport[0].remote_requested = false;
+	dcp->dptxport[1].remote_requested = false;
 
 	dcp->dptxep = afk_init(dcp, DPTX_ENDPOINT, dptxep_ops);
 	if (IS_ERR(dcp->dptxep))

@@ -3,7 +3,9 @@
 
 #include <linux/phy/phy.h>
 #include <linux/mux/consumer.h>
+#include <linux/spinlock.h>
 
+#include "dptx-attempt.h"
 #include "dptx-transport.h"
 
 enum dptx_apcall {
@@ -37,9 +39,11 @@ enum dptx_apcall {
 struct apple_epic_service;
 
 struct dptx_port {
-	bool enabled, connected;
+	bool enabled, connected, remote_requested;
+	bool connect_inflight, cleanup_owned, shutting_down;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
+	struct completion connect_idle;
 	u32 unit;
 	struct apple_epic_service *service;
 	union phy_configure_opts phy_ops;
@@ -49,6 +53,8 @@ struct dptx_port {
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
 	struct apple_dptx_transport transport;
+	spinlock_t attempt_lock; /* protects attempt */
+	struct apple_dptx_attempt attempt;
 };
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
