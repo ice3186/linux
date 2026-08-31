@@ -2886,12 +2886,13 @@ again:
 		 * both under the lock. Setting delalloc twice would wrongly
 		 * double account the space.
 		 */
-		if (IS_ENABLED(CONFIG_BTRFS_DEBUG) &&
-		    unlikely(btrfs_test_range_bit_exists(&inode->io_tree, start,
-							 start + sectorsize - 1,
-							 EXTENT_DELALLOC))) {
-			DEBUG_WARN("fixup worker: delalloc and fixup conflict. ino %llu start %llu",
-				   btrfs_ino(inode), start);
+		if (unlikely(btrfs_test_range_bit_exists(&inode->io_tree, start,
+							start + sectorsize - 1,
+							EXTENT_DELALLOC))) {
+			if (IS_ENABLED(CONFIG_BTRFS_DEBUG))
+				DEBUG_WARN(
+				"fixup worker: delalloc and fixup conflict. ino %llu start %llu",
+				btrfs_ino(inode), start);
 			btrfs_folio_clear_fixup(fs_info, folio, start, sectorsize);
 			continue;
 		}

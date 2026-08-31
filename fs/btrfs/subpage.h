@@ -187,6 +187,8 @@ bool btrfs_subpage_test_fixup(const struct btrfs_fs_info *fs_info,
 			      struct folio *folio, u64 start, u32 len);
 bool btrfs_folio_test_fixup(const struct btrfs_fs_info *fs_info,
 			    struct folio *folio, u64 start, u32 len);
+void btrfs_folio_set_fixup(const struct btrfs_fs_info *fs_info,
+			   struct folio *folio, u64 start, u32 len);
 void btrfs_folio_set_fixup_dirty(const struct btrfs_fs_info *fs_info,
 				 struct folio *folio, u64 start, u32 len);
 /* For a block that just got its space reserved; it stays dirty. */

@@ -652,6 +652,27 @@ bool btrfs_folio_test_fixup(const struct btrfs_fs_info *fs_info,
 	return btrfs_subpage_test_fixup(fs_info, folio, start, len);
 }
 
+void btrfs_folio_set_fixup(const struct btrfs_fs_info *fs_info,
+			   struct folio *folio, u64 start, u32 len)
+{
+	struct btrfs_folio_state *bfs;
+	unsigned int start_bit;
+	unsigned long flags;
+
+	if (!btrfs_is_subpage(fs_info, folio)) {
+		folio_set_fixup_pending(folio);
+		return;
+	}
+
+	bfs = folio_get_private(folio);
+	start_bit = subpage_calc_start_bit(fs_info, folio, fixup, start, len);
+
+	spin_lock_irqsave(&bfs->lock, flags);
+	bitmap_set(bfs->bitmaps, start_bit, len >> fs_info->sectorsize_bits);
+	folio_set_fixup_pending(folio);
+	spin_unlock_irqrestore(&bfs->lock, flags);
+}
+
 void btrfs_folio_clear_fixup(const struct btrfs_fs_info *fs_info,
 			     struct folio *folio, u64 start, u32 len)
 {
