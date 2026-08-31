@@ -73,14 +73,19 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 				 u8 atc, u8 die)
 {
 	struct dptx_port *dptx = service->cookie;
+	struct apple_dptx_target remote = {
+		.core = core,
+		.atc = atc,
+		.die = die,
+	};
 	struct dcpdptx_connection_cmd cmd, resp;
 	int ret;
-	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
-		     DCPDPTX_REMOTE_PORT_CONNECTED;
+	u32 target;
 
 	trace_dptxport_validate_connection(dptx, core, atc, die);
+	ret = apple_dptx_target_encode(&remote, &target);
+	if (ret)
+		return ret;
 
 	cmd.target = cpu_to_le32(target);
 	cmd.unk = cpu_to_le32(0x100);
@@ -101,15 +106,20 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 		     u8 die)
 {
 	struct dptx_port *dptx = service->cookie;
+	struct apple_dptx_target remote = {
+		.core = core,
+		.atc = atc,
+		.die = die,
+	};
 	struct dcpdptx_connection_cmd cmd, resp;
 	u32 unk_field = 0x0; // seen as 0x100 under some conditions
 	int ret;
-	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
-		     DCPDPTX_REMOTE_PORT_CONNECTED;
+	u32 target;
 
 	trace_dptxport_connect(dptx, core, atc, die);
+	ret = apple_dptx_target_encode(&remote, &target);
+	if (ret)
+		return ret;
 
 	cmd.target = cpu_to_le32(target);
 	cmd.unk = cpu_to_le32(unk_field);
@@ -234,13 +244,22 @@ dptxport_call_set_drive_settings(struct apple_epic_service *service,
 static int dptxport_call_get_max_link_rate(struct apple_epic_service *service,
 					   void *reply_, size_t reply_size)
 {
+	struct dptx_port *dptx = service->cookie;
 	struct dptxport_apcall_link_rate *reply = reply_;
+	u32 link_rate;
+	int ret;
 
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
 
+	ret = dptx->transport.ops->get_max_link_rate(dptx, service->ep->dcp,
+						    &link_rate);
 	reply->retcode = cpu_to_le32(0);
-	reply->link_rate = cpu_to_le32(LINK_RATE_HBR3);
+	if (ret) {
+		reply->retcode = cpu_to_le32(1);
+		link_rate = 0;
+	}
+	reply->link_rate = cpu_to_le32(link_rate);
 
 	return 0;
 }
@@ -250,31 +269,20 @@ static int dptxport_call_get_max_lane_count(struct apple_epic_service *service,
 {
 	struct dptxport_apcall_lane_count *reply = reply_;
 	struct dptx_port *dptx = service->cookie;
-	struct apple_dcp *dcp = service->ep->dcp;
-	union phy_configure_opts phy_ops;
+	u32 lane_count;
 	int ret;
 
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
 
-	ret = phy_validate(dptx->atcphy, PHY_MODE_DP, 0, &phy_ops);
+	ret = dptx->transport.ops->get_max_lane_count(dptx, service->ep->dcp,
+						     &lane_count);
 	if (ret < 0) {
-		dev_err(dcp->dev, "phy_validate failed: %d\n", ret);
 		reply->retcode = cpu_to_le32(1);
 		reply->lane_count = cpu_to_le64(0);
 	} else {
-		if (phy_ops.dp.lanes < 2) {
-			// phy_validate might return 0 lanes if atc phy is not
-			// yet switched to DP mode
-			dev_dbg(dcp->dev, "get_max_lane_count: phy lanes: %d\n",
-				phy_ops.dp.lanes);
-			// default to 4 lanes
-			dptx->lane_count = 4;
-		} else {
-			dptx->lane_count = phy_ops.dp.lanes;
-		}
 		reply->retcode = cpu_to_le32(0);
-		reply->lane_count = cpu_to_le64(dptx->lane_count);
+		reply->lane_count = cpu_to_le64(lane_count);
 	}
 
 	return 0;
@@ -285,7 +293,6 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 					       void *reply_, size_t reply_size)
 {
 	struct dptx_port *dptx = service->cookie;
-	struct apple_dcp *dcp = service->ep->dcp;
 	const struct dptxport_apcall_set_active_lane_count *request = data;
 	struct dptxport_apcall_set_active_lane_count *reply = reply_;
 	int ret = 0;
@@ -299,39 +306,48 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	u64 lane_count = le64_to_cpu(request->lane_count);
 
 	if (dptx->lane_count < lane_count)
-		dev_err(dcp->dev, "set_active_lane_count: unexpected lane "
+		dev_err(service->ep->dcp->dev,
+			"set_active_lane_count: unexpected lane "
 			"count:%llu phy: %d\n", lane_count, dptx->lane_count);
 
 	switch (lane_count) {
 	case 0 ... 2:
 	case 4:
-		dptx->phy_ops.dp.lanes = lane_count;
-		// Use dptx phy index > 3 as indication for dptx-phy or
-		// lpdptx-phy and configure the number of lanes for those
-		dptx->phy_ops.dp.set_lanes = (dcp->dptx_phy > 3);
 		break;
 	default:
-		dev_err(dcp->dev, "set_active_lane_count: invalid lane count:%llu\n", lane_count);
+		dev_err(service->ep->dcp->dev,
+			"set_active_lane_count: invalid lane count:%llu\n",
+			lane_count);
 		retcode = 1;
 		lane_count = 0;
 		break;
 	}
 
-	if (dptx->phy_ops.dp.set_lanes) {
-		if (dptx->atcphy) {
-			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
-			if (ret)
-				return ret;
-		}
-		dptx->phy_ops.dp.set_lanes = 0;
-		dptx->lane_count = lane_count;
+	if (!retcode && dptx->transport.kind == APPLE_DPTX_TRANSPORT_USB4 &&
+	    lane_count > dptx->transport.caps.max_lanes) {
+		retcode = 1;
+		lane_count = 0;
 	}
+
+	if (!retcode)
+		ret = dptx->transport.ops->set_active_lane_count(dptx,
+			service->ep->dcp, lane_count);
+	if (ret)
+		return ret;
 
 	reply->retcode = cpu_to_le32(retcode);
 	reply->lane_count = cpu_to_le64(lane_count);
 
-	if (lane_count > 0)
-		complete(&dptx->linkcfg_completion);
+	if (lane_count > 0) {
+		unsigned long flags;
+		bool wake;
+
+		spin_lock_irqsave(&dptx->attempt_lock, flags);
+		wake = apple_dptx_attempt_link_configured(&dptx->attempt);
+		spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+		if (wake)
+			complete(&dptx->linkcfg_completion);
+	}
 
 	return ret;
 }
@@ -379,8 +395,7 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct dptxport_apcall_link_rate *request = data;
 	struct dptxport_apcall_link_rate *reply = reply_;
-	u32 link_rate, phy_link_rate;
-	bool phy_set_rate = false;
+	u32 link_rate, ignored;
 	int ret;
 
 	if (reply_size < sizeof(*reply))
@@ -391,52 +406,22 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 	link_rate = le32_to_cpu(request->link_rate);
 	trace_dptxport_call_set_link_rate(dptx, link_rate);
 
-	switch (link_rate) {
-	case LINK_RATE_RBR:
-		phy_link_rate = 1620;
-		phy_set_rate = true;
-		break;
-	case LINK_RATE_HBR:
-		phy_link_rate = 2700;
-		phy_set_rate = true;
-		break;
-	case LINK_RATE_HBR2:
-		phy_link_rate = 5400;
-		phy_set_rate = true;
-		break;
-	case LINK_RATE_HBR3:
-		phy_link_rate = 8100;
-		phy_set_rate = true;
-		break;
-	case 0:
-		phy_link_rate = 0;
-		phy_set_rate = true;
-		break;
-	default:
+	if (apple_dptx_rate_to_mbps(link_rate, &ignored) ||
+	    (dptx->transport.kind == APPLE_DPTX_TRANSPORT_USB4 &&
+	     link_rate > dptx->transport.caps.max_link_rate)) {
 		dev_err(service->ep->dcp->dev,
 			"DPTXPort: Unsupported link rate 0x%x requested\n",
 			link_rate);
 		link_rate = 0;
-		phy_set_rate = false;
-		break;
+		goto out_reply;
 	}
 
-	if (phy_set_rate) {
-		dptx->phy_ops.dp.link_rate = phy_link_rate;
-		dptx->phy_ops.dp.set_rate = 1;
+	ret = dptx->transport.ops->set_link_rate(dptx, service->ep->dcp,
+						 link_rate);
+	if (ret)
+		return ret;
 
-		if (dptx->atcphy) {
-			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
-			if (ret)
-				return ret;
-		}
-
-		//if (dptx->phy_ops.dp.set_rate)
-		dptx->link_rate = dptx->pending_link_rate = link_rate;
-
-	}
-
-	//dptx->pending_link_rate = link_rate;
+out_reply:
 	reply->retcode = cpu_to_le32(0);
 	reply->link_rate = cpu_to_le32(link_rate);
 
@@ -476,12 +461,11 @@ dptxport_call_activate(struct apple_epic_service *service,
 		       void *reply, size_t reply_size)
 {
 	struct dptx_port *dptx = service->cookie;
-	const struct apple_dcp *dcp = service->ep->dcp;
+	int ret;
 
-	// TODO: hack, use phy_set_mode to select the correct DCP(EXT) input
-	// for standalone phy (i.e. not atc phy).
-	if (!dcp->typec_mux)
-		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
+	ret = dptx->transport.ops->activate(dptx, service->ep->dcp);
+	if (ret)
+		return ret;
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
@@ -496,9 +480,11 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 		       void *reply, size_t reply_size)
 {
 	struct dptx_port *dptx = service->cookie;
+	int ret;
 
-	/* deactivate phy */
-	phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
+	ret = dptx->transport.ops->deactivate(dptx, service->ep->dcp);
+	if (ret)
+		return ret;
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
@@ -588,6 +574,7 @@ static void dptxport_init(struct apple_epic_service *service, const char *name,
 		}
 		service->ep->dcp->dptxport[unit].unit = unit;
 		service->ep->dcp->dptxport[unit].service = service;
+		apple_dptx_transport_init_physical(&service->ep->dcp->dptxport[unit]);
 		service->ep->dcp->dptxport[unit].enabled = true;
 		service->cookie = (void *)&service->ep->dcp->dptxport[unit];
 		complete(&service->ep->dcp->dptxport[unit].enable_completion);
@@ -617,6 +604,24 @@ int dptxep_init(struct apple_dcp *dcp)
 	init_completion(&dcp->dptxport[1].enable_completion);
 	init_completion(&dcp->dptxport[0].linkcfg_completion);
 	init_completion(&dcp->dptxport[1].linkcfg_completion);
+	init_completion(&dcp->dptxport[0].connect_idle);
+	init_completion(&dcp->dptxport[1].connect_idle);
+	complete_all(&dcp->dptxport[0].connect_idle);
+	complete_all(&dcp->dptxport[1].connect_idle);
+	spin_lock_init(&dcp->dptxport[0].attempt_lock);
+	spin_lock_init(&dcp->dptxport[1].attempt_lock);
+	apple_dptx_attempt_init(&dcp->dptxport[0].attempt);
+	apple_dptx_attempt_init(&dcp->dptxport[1].attempt);
+	dcp->dptxport[0].connect_inflight = false;
+	dcp->dptxport[1].connect_inflight = false;
+	dcp->dptxport[0].cleanup_owned = false;
+	dcp->dptxport[1].cleanup_owned = false;
+	dcp->dptxport[0].shutting_down = false;
+	dcp->dptxport[1].shutting_down = false;
+	dcp->dptxport[0].connected = false;
+	dcp->dptxport[1].connected = false;
+	dcp->dptxport[0].remote_requested = false;
+	dcp->dptxport[1].remote_requested = false;
 
 	dcp->dptxep = afk_init(dcp, DPTX_ENDPOINT, dptxep_ops);
 	if (IS_ERR(dcp->dptxep))

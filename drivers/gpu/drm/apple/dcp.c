@@ -357,9 +357,34 @@ int dcp_get_connector_type(struct platform_device *pdev)
 
 #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
 
+static void
+dcp_dptx_attempt_quarantine(struct dptx_port *dptx,
+			    const struct apple_dptx_attempt_ticket *ticket)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dptx->attempt_lock, flags);
+	apple_dptx_attempt_fail(&dptx->attempt, ticket);
+	spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+}
+
+static void dcp_dptx_attempt_fail(struct dptx_port *dptx)
+{
+	dcp_dptx_attempt_quarantine(dptx, NULL);
+}
+
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
+	struct apple_dptx_attempt_ticket ticket;
+	struct dptx_port *dptx;
+	unsigned long flags;
+	unsigned long remaining;
+	int release_ret;
 	int ret = 0;
+
+	if (port >= ARRAY_SIZE(dcp->dptxport))
+		return -EINVAL;
+	dptx = &dcp->dptxport[port];
 
 	if (!dcp->phy) {
 		dev_warn(dcp->dev, "dcp_dptx_connect: missing phy\n");
@@ -368,41 +393,116 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
 
 	mutex_lock(&dcp->hpd_mutex);
-	if (!dcp->dptxport[port].enabled) {
+	if (!dptx->enabled) {
 		dev_warn(dcp->dev, "dcp_dptx_connect: dptx service for port %d not enabled\n", port);
 		ret = -ENODEV;
 		goto out_unlock;
 	}
+	if (dptx->shutting_down) {
+		ret = -ESHUTDOWN;
+		goto out_unlock;
+	}
 
-	if (dcp->dptxport[port].connected)
+	spin_lock_irqsave(&dptx->attempt_lock, flags);
+	if (dptx->attempt.phase == APPLE_DPTX_ATTEMPT_CONNECTED) {
+		spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+		goto out_unlock;
+	}
+	if (dptx->attempt.phase == APPLE_DPTX_ATTEMPT_FAILED) {
+		spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+		dev_warn_ratelimited(dcp->dev,
+				     "%s: port %u is quarantined until DPTX restart\n",
+				     __func__, port);
+		ret = -EIO;
+		goto out_unlock;
+	}
+	/* Publish CONNECTING only after its completion has been cleared. */
+	ret = apple_dptx_attempt_begin(&dptx->attempt, &ticket);
+	if (!ret)
+		reinit_completion(&dptx->linkcfg_completion);
+	spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+	if (ret)
 		goto out_unlock;
 
-	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
-	dcp->dptxport[port].atcphy = dcp->phy;
-	dptxport_connect(dcp->dptxport[port].service, 0, dcp->dptx_phy, dcp->dptx_die);
-	dptxport_request_display(dcp->dptxport[port].service);
-	dcp->dptxport[port].connected = true;
+	/* Shutdown cannot interleave here because hpd_mutex is still held. */
+	reinit_completion(&dptx->connect_idle);
+	dptx->connect_inflight = true;
+	dptx->cleanup_owned = false;
+
+	dptx->atcphy = dcp->phy;
+	ret = dptxport_connect(dptx->service, 0, dcp->dptx_phy,
+			       dcp->dptx_die);
+	if (ret) {
+		/* The command may have reached firmware even if its reply failed. */
+		goto out_abort;
+	}
+	/* Once issued, a lost response leaves remote ownership ambiguous. */
+	dptx->remote_requested = true;
+	ret = dptxport_request_display(dptx->service);
+	if (ret) {
+		/* There is no protocol token with which to prove remote ownership. */
+		goto out_release;
+	}
 
 	mutex_unlock(&dcp->hpd_mutex);
-	ret = wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
-				    DPTX_CONNECT_TIMEOUT);
-	if (ret < 0)
+	remaining = wait_for_completion_timeout(&dptx->linkcfg_completion,
+						DPTX_CONNECT_TIMEOUT);
+	mutex_lock(&dcp->hpd_mutex);
+	spin_lock_irqsave(&dptx->attempt_lock, flags);
+	ret = apple_dptx_attempt_finish_wait(&dptx->attempt, &ticket,
+					     remaining != 0);
+	spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+	if (ret) {
 		dev_warn(dcp->dev, "dcp_dptx_connect: port %d link complete failed:%d\n",
 			 port, ret);
-	else
+		goto out_release;
+	} else {
 		dev_dbg(dcp->dev, "dcp_dptx_connect: waited %d ms for link\n",
-			jiffies_to_msecs(DPTX_CONNECT_TIMEOUT - ret));
+			jiffies_to_msecs(DPTX_CONNECT_TIMEOUT - remaining));
+	}
 
 	usleep_range(5, 10);
 
-	if (dcp->connector_type == DRM_MODE_CONNECTOR_DisplayPort)
-		dptxport_set_hpd(dcp->dptxport[port].service, true);
+	if (dcp->connector_type == DRM_MODE_CONNECTOR_DisplayPort) {
+		ret = dptxport_set_hpd(dptx->service, true);
+		if (ret) {
+			release_ret = dptxport_set_hpd(dptx->service, false);
+			if (release_ret) {
+				dev_warn(dcp->dev,
+					 "%s: port %d HPD rollback failed:%d\n",
+					 __func__, port, release_ret);
+			}
+			goto out_release;
+		}
+	}
 
 	if (dcp->avep)
 		av_service_connect(dcp);
+	dptx->connected = true;
 
-	return 0;
+	goto out_done;
 
+out_release:
+	if (dptx->remote_requested && !dptx->cleanup_owned) {
+		release_ret = dptxport_release_display(dptx->service);
+		if (release_ret) {
+			dev_warn(dcp->dev,
+				 "%s: port %d release failed:%d\n", __func__,
+				 port, release_ret);
+			if (!ret)
+				ret = release_ret;
+		} else {
+			dptx->remote_requested = false;
+		}
+	}
+	dptx->connected = false;
+out_abort:
+	/* Failed attempts are never reusable: firmware APCALLs have no ticket. */
+	dcp_dptx_attempt_quarantine(dptx, &ticket);
+out_done:
+	dptx->connect_inflight = false;
+	dptx->cleanup_owned = false;
+	complete_all(&dptx->connect_idle);
 out_unlock:
 	mutex_unlock(&dcp->hpd_mutex);
 	return ret;
@@ -416,18 +516,127 @@ static void disconnected_hpd_event(struct apple_connector *con)
 	}
 }
 
-static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port, bool oob)
 {
+	struct dptx_port *dptx;
+	unsigned long flags;
+	bool wake = false;
+	bool admitted = false;
+	bool active;
+	int ret = 0;
+	int tmp;
+
+	if (port >= ARRAY_SIZE(dcp->dptxport))
+		return -EINVAL;
+	dptx = &dcp->dptxport[port];
+
 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
 
 	mutex_lock(&dcp->hpd_mutex);
-	if (dcp->dptxport[port].enabled && dcp->dptxport[port].connected) {
-		dptxport_release_display(dcp->dptxport[port].service);
-		dcp->dptxport[port].connected = false;
+	if (dptx->shutting_down) {
+		ret = -ESHUTDOWN;
+		goto out_unlock;
+	}
+	admitted = true;
+	if (oob && dcp->avep)
+		av_service_disconnect(dcp);
+	if (!dptx->enabled)
+		goto out_unlock;
+
+	active = dptx->connected || dptx->remote_requested ||
+		 dptx->connect_inflight;
+	if (dptx->connect_inflight)
+		dptx->cleanup_owned = true;
+	spin_lock_irqsave(&dptx->attempt_lock, flags);
+	wake = apple_dptx_attempt_cancel(&dptx->attempt);
+	spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+	if (wake)
+		complete_all(&dptx->linkcfg_completion);
+
+	if (oob && active) {
+		tmp = dptxport_set_hpd(dptx->service, false);
+		if (tmp) {
+			dcp_dptx_attempt_fail(dptx);
+			if (!ret)
+				ret = tmp;
+		}
+	}
+
+	if (dptx->connected)
+		dptx->connected = false;
+
+	if (dptx->remote_requested) {
+		tmp = dptxport_release_display(dptx->service);
+		if (tmp) {
+			dcp_dptx_attempt_fail(dptx);
+			if (!ret)
+				ret = tmp;
+		} else {
+			dptx->remote_requested = false;
+		}
+	}
+
+out_unlock:
+	mutex_unlock(&dcp->hpd_mutex);
+	if (oob && admitted)
+		disconnected_hpd_event(dcp->connector);
+
+	return ret;
+}
+
+static void dcp_dptx_shutdown(struct apple_dcp *dcp)
+{
+	struct dptx_port *dptx;
+	unsigned long flags;
+	unsigned int port;
+	bool wake;
+	int ret;
+
+	/* Stop admission and wake every waiter while the DPTX endpoint is alive. */
+	mutex_lock(&dcp->hpd_mutex);
+	for (port = 0; port < ARRAY_SIZE(dcp->dptxport); port++) {
+		dptx = &dcp->dptxport[port];
+		dptx->shutting_down = true;
+		if (dptx->connect_inflight)
+			dptx->cleanup_owned = true;
+		spin_lock_irqsave(&dptx->attempt_lock, flags);
+		wake = apple_dptx_attempt_cancel(&dptx->attempt);
+		spin_unlock_irqrestore(&dptx->attempt_lock, flags);
+		if (wake)
+			complete_all(&dptx->linkcfg_completion);
 	}
 	mutex_unlock(&dcp->hpd_mutex);
 
-	return 0;
+	/* Connect cleanup can use both DPTX and AV services, so drain it first. */
+	for (port = 0; port < ARRAY_SIZE(dcp->dptxport); port++)
+		wait_for_completion(&dcp->dptxport[port].connect_idle);
+
+	mutex_lock(&dcp->hpd_mutex);
+	for (port = 0; port < ARRAY_SIZE(dcp->dptxport); port++) {
+		dptx = &dcp->dptxport[port];
+		if (!dptx->enabled)
+			continue;
+
+		ret = dptxport_set_hpd(dptx->service, false);
+		if (ret)
+			dev_warn(dcp->dev,
+				 "%s: port %u HPD low failed:%d\n", __func__,
+				 port, ret);
+
+		if (dptx->remote_requested) {
+			ret = dptxport_release_display(dptx->service);
+			if (ret) {
+				dev_warn(dcp->dev,
+					 "%s: port %u release failed:%d\n",
+					 __func__, port, ret);
+				dcp_dptx_attempt_fail(dptx);
+			} else {
+				dptx->remote_requested = false;
+			}
+		}
+		dptx->connected = false;
+	}
+	mutex_unlock(&dcp->hpd_mutex);
 }
 
 int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
@@ -440,15 +649,7 @@ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 
-	disconnected_hpd_event(dcp->connector);
-
-	if (dcp->avep)
-		av_service_disconnect(dcp);
-
-	if (dcp->dptxport[port].enabled)
-		dptxport_set_hpd(dcp->dptxport[port].service, false);
-
-	return dcp_dptx_disconnect(dcp, port);
+	return dcp_dptx_disconnect(dcp, port, true);
 }
 
 static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
@@ -700,7 +901,7 @@ void dcp_poweroff(struct platform_device *pdev)
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		if (!connected) {
 			disconnected_hpd_event(dcp->connector);
-			dcp_dptx_disconnect(dcp, 0);
+			dcp_dptx_disconnect(dcp, 0, false);
 		}
 	}
 }
@@ -1115,6 +1316,9 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
 	if (dcp->hdmi_hpd_irq)
 		disable_irq(dcp->hdmi_hpd_irq);
 
+	if (dcp->dptxep)
+		dcp_dptx_shutdown(dcp);
+
 	typec_mux_put(dcp->typec_mux);
 
 	if (dcp->avep) {
@@ -1326,7 +1530,7 @@ static int dcp_platform_suspend(struct device *dev)
 	if (dcp->hdmi_hpd_irq) {
 		disable_irq(dcp->hdmi_hpd_irq);
 		disconnected_hpd_event(dcp->connector);
-		dcp_dptx_disconnect(dcp, 0);
+		dcp_dptx_disconnect(dcp, 0, false);
 	}
 	/*
 	 * Set the device as a wakeup device, which forces its power

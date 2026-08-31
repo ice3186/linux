@@ -11,6 +11,13 @@
 
 #include <linux/thunderbolt.h>
 
+struct tb_port;
+
+struct tb_dp_source_cookie {
+	u64 session;
+	u64 token;
+};
+
 enum nhi_fw_mode {
 	NHI_FW_SAFE_MODE,
 	NHI_FW_AUTH_MODE,
@@ -79,6 +86,23 @@ struct tb_nhi_ring_layout {
  *		    the standard USB4 NHI registers are used.
  * @is_present: Whether the device is currently present on the parent bus
  * @init_interrupts: NHI specific interrupt initialization hook
+ * @dp_tunnel_prepare: Optional platform DP source reservation hook. Called
+ *		       after DP capabilities are exchanged but before tunnel paths
+ *		       are activated.
+ * @dp_tunnel_enable: Optional platform DP source enable hook. Called after
+ *		      both DP adapters are enabled and before DPRX polling starts.
+ * @dp_tunnel_disable: Optional platform DP source disable hook. Called after
+ *		       DPRX polling stops and before the adapters are disabled.
+ * @dp_tunnel_unprepare: Optional platform DP source release hook. Called
+ *			 after the tunnel paths are deactivated.
+ *
+ * The DP tunnel hooks run in sleepable context with the Thunderbolt domain
+ * lock held. They must not wait on work that needs that lock. Enable failures
+ * are followed by disable/unprepare only for phases that completed. Prepare
+ * fills a provider cookie that identifies the reservation; all later phases
+ * receive the same cookie so stale teardown cannot release a newer source.
+ * Providers that implement enable, disable, or unprepare must also implement
+ * prepare.
  */
 struct tb_nhi_ops {
 	int (*init)(struct tb_nhi *nhi);
@@ -96,6 +120,18 @@ struct tb_nhi_ops {
 	void (*ring_configure)(struct tb_ring *ring, u32 flags, u32 e2e_flags);
 	bool (*is_present)(struct tb_nhi *nhi);
 	int (*init_interrupts)(struct tb_nhi *nhi);
+	int (*dp_tunnel_prepare)(struct tb_nhi *nhi, struct tb_port *in,
+				 struct tb_port *out,
+				 struct tb_dp_source_cookie *cookie);
+	int (*dp_tunnel_enable)(struct tb_nhi *nhi, struct tb_port *in,
+				struct tb_port *out,
+				const struct tb_dp_source_cookie *cookie);
+	void (*dp_tunnel_disable)(struct tb_nhi *nhi, struct tb_port *in,
+				  struct tb_port *out,
+				  const struct tb_dp_source_cookie *cookie);
+	void (*dp_tunnel_unprepare)(struct tb_nhi *nhi, struct tb_port *in,
+				    struct tb_port *out,
+				    const struct tb_dp_source_cookie *cookie);
 };
 
 /*

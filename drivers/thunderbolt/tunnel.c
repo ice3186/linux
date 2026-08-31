@@ -1019,36 +1019,61 @@ static int tb_dp_pre_activate(struct tb_tunnel *tunnel)
 	struct tb_port *in = tunnel->src_port;
 	struct tb_switch *sw = in->sw;
 	struct tb *tb = in->sw->tb;
+	const struct tb_nhi_ops *ops = tb->nhi->ops;
+	bool bw_mode_enabled = false;
 	int ret;
 
 	ret = tb_dp_xchg_caps(tunnel);
 	if (ret)
 		return ret;
 
-	if (!tb_switch_is_usb4(sw))
-		return 0;
+	if (tb_switch_is_usb4(sw) &&
+	    usb4_dp_port_bandwidth_mode_supported(in)) {
+		tb_tunnel_dbg(tunnel, "bandwidth allocation mode supported\n");
 
-	if (!usb4_dp_port_bandwidth_mode_supported(in))
-		return 0;
+		ret = usb4_dp_port_set_cm_id(in, tb->index);
+		if (ret)
+			return ret;
 
-	tb_tunnel_dbg(tunnel, "bandwidth allocation mode supported\n");
+		ret = tb_dp_bandwidth_alloc_mode_enable(tunnel);
+		if (ret)
+			return ret;
+		bw_mode_enabled = true;
+	}
 
-	ret = usb4_dp_port_set_cm_id(in, tb->index);
-	if (ret)
-		return ret;
+	if (ops->dp_tunnel_prepare && !tunnel->dp_source_prepared) {
+		ret = ops->dp_tunnel_prepare(tb->nhi, tunnel->src_port,
+					     tunnel->dst_port,
+					     &tunnel->dp_source_cookie);
+		if (ret) {
+			if (bw_mode_enabled)
+				usb4_dp_port_set_cm_bandwidth_mode_supported(in, false);
+			return ret;
+		}
+		tunnel->dp_source_prepared = true;
+	}
 
-	return tb_dp_bandwidth_alloc_mode_enable(tunnel);
+	return 0;
 }
 
 static void tb_dp_post_deactivate(struct tb_tunnel *tunnel)
 {
 	struct tb_port *in = tunnel->src_port;
+	struct tb *tb = tunnel->tb;
+	const struct tb_nhi_ops *ops = tb->nhi->ops;
 
-	if (!usb4_dp_port_bandwidth_mode_supported(in))
-		return;
-	if (usb4_dp_port_bandwidth_mode_enabled(in)) {
+	if (usb4_dp_port_bandwidth_mode_supported(in) &&
+	    usb4_dp_port_bandwidth_mode_enabled(in)) {
 		usb4_dp_port_set_cm_bandwidth_mode_supported(in, false);
 		tb_tunnel_dbg(tunnel, "bandwidth allocation mode disabled\n");
+	}
+
+	if (tunnel->dp_source_prepared) {
+		if (ops->dp_tunnel_unprepare)
+			ops->dp_tunnel_unprepare(tb->nhi, tunnel->src_port,
+						 tunnel->dst_port,
+						 &tunnel->dp_source_cookie);
+		tunnel->dp_source_prepared = false;
 	}
 }
 
@@ -1171,6 +1196,16 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 			paths[TB_DP_AUX_PATH_OUT]->hops[last].next_hop_index);
 	} else {
 		tb_dp_dprx_stop(tunnel);
+		if (tunnel->dp_source_enabled) {
+			const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
+
+			if (ops->dp_tunnel_disable)
+				ops->dp_tunnel_disable(tunnel->tb->nhi,
+						       tunnel->src_port,
+						       tunnel->dst_port,
+						       &tunnel->dp_source_cookie);
+			tunnel->dp_source_enabled = false;
+		}
 		tb_dp_port_hpd_clear(tunnel->src_port);
 		tb_dp_port_set_hops(tunnel->src_port, 0, 0, 0);
 		if (tb_port_is_dpout(tunnel->dst_port))
@@ -1185,6 +1220,17 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 		ret = tb_dp_port_enable(tunnel->dst_port, active);
 		if (ret)
 			return ret;
+	}
+
+	if (active && !tunnel->dp_source_enabled &&
+	    tunnel->tb->nhi->ops->dp_tunnel_enable) {
+		ret = tunnel->tb->nhi->ops->dp_tunnel_enable(tunnel->tb->nhi,
+							      tunnel->src_port,
+							      tunnel->dst_port,
+							      &tunnel->dp_source_cookie);
+		if (ret)
+			return ret;
+		tunnel->dp_source_enabled = true;
 	}
 
 	return active ? tb_dp_dprx_start(tunnel) : 0;

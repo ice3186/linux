@@ -3,6 +3,10 @@
 
 #include <linux/phy/phy.h>
 #include <linux/mux/consumer.h>
+#include <linux/spinlock.h>
+
+#include "dptx-attempt.h"
+#include "dptx-transport.h"
 
 enum dptx_apcall {
 	DPTX_APCALL_ACTIVATE = 0,
@@ -32,24 +36,14 @@ enum dptx_apcall {
 	DPTX_APCALL_DEVICE_NOT_STARTED = 24,
 };
 
-#define DCPDPTX_REMOTE_PORT_CORE GENMASK(3, 0)
-#define DCPDPTX_REMOTE_PORT_ATC GENMASK(7, 4)
-#define DCPDPTX_REMOTE_PORT_DIE GENMASK(11, 8)
-#define DCPDPTX_REMOTE_PORT_CONNECTED BIT(15)
-
-enum dptx_link_rate {
-	LINK_RATE_RBR = 0x06,
-	LINK_RATE_HBR = 0x0a,
-	LINK_RATE_HBR2 = 0x14,
-	LINK_RATE_HBR3 = 0x1e,
-};
-
 struct apple_epic_service;
 
 struct dptx_port {
-	bool enabled, connected;
+	bool enabled, connected, remote_requested;
+	bool connect_inflight, cleanup_owned, shutting_down;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
+	struct completion connect_idle;
 	u32 unit;
 	struct apple_epic_service *service;
 	union phy_configure_opts phy_ops;
@@ -58,6 +52,9 @@ struct dptx_port {
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
+	struct apple_dptx_transport transport;
+	spinlock_t attempt_lock; /* protects attempt */
+	struct apple_dptx_attempt attempt;
 };
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
