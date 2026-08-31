@@ -7,6 +7,7 @@ appledrm-y += afk.o dcp.o dcp_backlight.o dptxep.o dptx-transport.o
 appledrm-y += dptx-transport-phy.o iomfb.o parser.o systemep.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dptx-transport-test.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dptx-attempt-test.o
+appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp-display-source-test.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += audio.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += av.o
 appledrm-y += connector.o

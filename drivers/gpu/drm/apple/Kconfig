@@ -35,7 +35,8 @@ config DRM_APPLE_KUNIT_TEST
 	default KUNIT_ALL_TESTS
 	help
 	  This builds unit tests for Apple DPTX transport-independent logic,
-	  including remote-target encoding and the side-effect-free logical
-	  USB4 transport model. These tests are intended for kernel developers.
+	  including remote-target encoding, the side-effect-free logical USB4
+	  transport model, and the unconnected external-display ownership
+	  reducer. These tests are intended for kernel developers.
 
 	  If in doubt, say "N".
