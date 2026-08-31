@@ -70,7 +70,9 @@
 #include <linux/usb/pd.h>
 #include <linux/usb/typec_mux.h>
 #include <linux/usb/typec_tbt.h>
+#include <linux/workqueue.h>
 
+#include "apple-dp-source.h"
 #include "nhi.h"
 #include "tb.h"
 
@@ -132,6 +134,14 @@ struct apple_cio {
 	int nhi_boot_status;
 
 	struct typec_thunderbolt_switch_dev *tbt_switch;
+
+	struct {
+		spinlock_t lock; /* protects desired and applied */
+		struct apple_dp_source_state desired;
+		struct apple_dp_source_state applied;
+		struct work_struct work;
+		struct workqueue_struct *wq;
+	} dp_source;
 };
 
 struct apple_nhi {
@@ -155,6 +165,89 @@ struct apple_nhi {
 };
 
 #define nhi_to_anhi(nhi_) container_of((nhi_), struct apple_nhi, nhi)
+
+static const char *apple_dp_source_phase_name(enum apple_dp_source_phase phase)
+{
+	switch (phase) {
+	case APPLE_DP_SOURCE_IDLE:
+		return "idle";
+	case APPLE_DP_SOURCE_PREPARED:
+		return "prepared";
+	case APPLE_DP_SOURCE_ENABLED:
+		return "enabled";
+	}
+
+	return "unknown";
+}
+
+static void apple_dp_source_work(struct work_struct *work)
+{
+	struct apple_cio *acio = container_of(work, struct apple_cio, dp_source.work);
+	struct apple_dp_source_state desired;
+	struct apple_dp_source_state applied;
+	unsigned long flags;
+	bool stable;
+
+	/*
+	 * This worker must never acquire acio->lock or a Thunderbolt lock. It is
+	 * flushed while ACIO teardown holds acio->lock, after the NHI is gone.
+	 */
+	do {
+		spin_lock_irqsave(&acio->dp_source.lock, flags);
+		desired = acio->dp_source.desired;
+		applied = acio->dp_source.applied;
+		spin_unlock_irqrestore(&acio->dp_source.lock, flags);
+
+		dev_info(acio->dev,
+			 "experimental DP source apply %s -> %s generation %llu, session %llu, token %llu, %llx:%u -> %llx:%u (trace only)\n",
+			 apple_dp_source_phase_name(applied.phase),
+			 apple_dp_source_phase_name(desired.phase), desired.generation,
+			 desired.cookie.session, desired.cookie.token,
+			 desired.endpoint.in_route, desired.endpoint.in_port,
+			 desired.endpoint.out_route, desired.endpoint.out_port);
+
+		spin_lock_irqsave(&acio->dp_source.lock, flags);
+		acio->dp_source.applied = desired;
+		stable = desired.generation == acio->dp_source.desired.generation;
+		spin_unlock_irqrestore(&acio->dp_source.lock, flags);
+	} while (!stable);
+}
+
+static void apple_dp_source_queue(struct apple_cio *acio)
+{
+	queue_work(acio->dp_source.wq, &acio->dp_source.work);
+}
+
+static int apple_dp_source_start(struct apple_cio *acio)
+{
+	unsigned long flags;
+	int ret;
+
+	/* The first accepted prepare publishes the new session to the worker. */
+	spin_lock_irqsave(&acio->dp_source.lock, flags);
+	ret = apple_dp_source_begin_session(&acio->dp_source.desired);
+	spin_unlock_irqrestore(&acio->dp_source.lock, flags);
+	return ret;
+}
+
+static void apple_dp_source_stop(struct apple_cio *acio)
+{
+	unsigned long flags;
+	bool changed;
+
+	spin_lock_irqsave(&acio->dp_source.lock, flags);
+	changed = apple_dp_source_quiesce(&acio->dp_source.desired);
+	spin_unlock_irqrestore(&acio->dp_source.lock, flags);
+	if (changed)
+		apple_dp_source_queue(acio);
+}
+
+static void apple_dp_source_destroy(void *data)
+{
+	struct apple_cio *acio = data;
+
+	destroy_workqueue(acio->dp_source.wq);
+}
 
 static int apple_cio_rtkit_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
 {
@@ -387,43 +480,96 @@ static void apple_nhi_ring_configure(struct tb_ring *ring, u32 flags, u32 e2e_fl
  * register programming is not understood well enough to enable a route.
  */
 static int apple_nhi_dp_tunnel_prepare(struct tb_nhi *nhi, struct tb_port *in,
-				       struct tb_port *out)
+				       struct tb_port *out,
+				       struct tb_dp_source_cookie *cookie)
 {
 	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+	struct apple_cio *acio = anhi->acio;
+	struct apple_dp_source_endpoint endpoint = {
+		.in_route = tb_route(in->sw),
+		.out_route = tb_route(out->sw),
+		.in_port = in->port,
+		.out_port = out->port,
+	};
+	struct apple_dp_source_cookie apple_cookie;
+	unsigned long flags;
+	int ret;
 
+	spin_lock_irqsave(&acio->dp_source.lock, flags);
+	ret = apple_dp_source_prepare(&acio->dp_source.desired, &endpoint,
+				      &apple_cookie);
+	spin_unlock_irqrestore(&acio->dp_source.lock, flags);
+	if (ret)
+		return ret;
+
+	cookie->session = apple_cookie.session;
+	cookie->token = apple_cookie.token;
 	dev_info(anhi->dev,
-		 "experimental DP source prepare %llx:%u -> %llx:%u (trace only)\n",
-		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+		 "experimental DP source reserved session %llu token %llu (trace only)\n",
+		 cookie->session, cookie->token);
+	apple_dp_source_queue(acio);
 	return 0;
 }
 
 static int apple_nhi_dp_tunnel_enable(struct tb_nhi *nhi, struct tb_port *in,
-				      struct tb_port *out)
+				      struct tb_port *out,
+				      const struct tb_dp_source_cookie *cookie)
 {
 	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+	struct apple_dp_source_cookie apple_cookie = {
+		.session = cookie->session,
+		.token = cookie->token,
+	};
+	unsigned long flags;
+	int ret;
 
-	dev_info(anhi->dev,
-		 "experimental DP source enable %llx:%u -> %llx:%u (no video side effects)\n",
-		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
-	return 0;
+	spin_lock_irqsave(&anhi->acio->dp_source.lock, flags);
+	ret = apple_dp_source_enable(&anhi->acio->dp_source.desired,
+				     &apple_cookie);
+	spin_unlock_irqrestore(&anhi->acio->dp_source.lock, flags);
+	if (!ret)
+		apple_dp_source_queue(anhi->acio);
+	return ret;
 }
 
 static void apple_nhi_dp_tunnel_disable(struct tb_nhi *nhi, struct tb_port *in,
-					struct tb_port *out)
+					struct tb_port *out,
+					const struct tb_dp_source_cookie *cookie)
 {
 	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+	struct apple_dp_source_cookie apple_cookie = {
+		.session = cookie->session,
+		.token = cookie->token,
+	};
+	unsigned long flags;
+	bool changed;
 
-	dev_info(anhi->dev, "experimental DP source disable %llx:%u -> %llx:%u\n",
-		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+	spin_lock_irqsave(&anhi->acio->dp_source.lock, flags);
+	changed = apple_dp_source_disable(&anhi->acio->dp_source.desired,
+					  &apple_cookie);
+	spin_unlock_irqrestore(&anhi->acio->dp_source.lock, flags);
+	if (changed)
+		apple_dp_source_queue(anhi->acio);
 }
 
 static void apple_nhi_dp_tunnel_unprepare(struct tb_nhi *nhi, struct tb_port *in,
-					  struct tb_port *out)
+					  struct tb_port *out,
+					  const struct tb_dp_source_cookie *cookie)
 {
 	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+	struct apple_dp_source_cookie apple_cookie = {
+		.session = cookie->session,
+		.token = cookie->token,
+	};
+	unsigned long flags;
+	bool changed;
 
-	dev_info(anhi->dev, "experimental DP source unprepare %llx:%u -> %llx:%u\n",
-		 tb_route(in->sw), in->port, tb_route(out->sw), out->port);
+	spin_lock_irqsave(&anhi->acio->dp_source.lock, flags);
+	changed = apple_dp_source_unprepare(&anhi->acio->dp_source.desired,
+					    &apple_cookie);
+	spin_unlock_irqrestore(&anhi->acio->dp_source.lock, flags);
+	if (changed)
+		apple_dp_source_queue(anhi->acio);
 }
 
 static const struct tb_nhi_ops apple_nhi_ops = {
@@ -628,6 +774,7 @@ static void apple_cio_stop(struct apple_cio *acio)
 	lockdep_assert_held(&acio->lock);
 	dev_info(acio->dev, "stopping ACIO: current cable info 0x%x, target 0x%x\n",
 		 acio->current_cable_info, acio->target_cable_info);
+	apple_dp_source_stop(acio);
 
 	/*
 	 * First, shutdown the blocks inside the ACIO complex, like the NHI and the IOMMU.
@@ -635,6 +782,7 @@ static void apple_cio_stop(struct apple_cio *acio)
 	 * the MMIO space of these so make sure nothing tries to do just that.
 	 */
 	of_platform_depopulate(acio->dev);
+	flush_workqueue(acio->dp_source.wq);
 	dev_info(acio->dev, "ACIO child devices stopped\n");
 
 	/* Try to shut down and power off the co-processor gracefully */
@@ -708,6 +856,9 @@ static int apple_cio_start(struct apple_cio *acio)
 	}
 
 	apple_tunable_apply(acio->rc_base, acio->rc_tunable);
+	ret = apple_dp_source_start(acio);
+	if (ret)
+		goto err_depopulate;
 
 	/*
 	 * Bring up devices which are part of ACIO and are now accessible by the main SoC
@@ -735,7 +886,9 @@ static int apple_cio_start(struct apple_cio *acio)
 	return 0;
 
 err_depopulate:
+	apple_dp_source_stop(acio);
 	of_platform_depopulate(acio->dev);
+	flush_workqueue(acio->dp_source.wq);
 err_shutdown_rtkit:
 	/* Ignore errors here since we're about to cut power to the entire block anyway */
 	apple_rtkit_poweroff(acio->rtk);
@@ -843,6 +996,16 @@ static int apple_cio_probe(struct platform_device *pdev)
 	init_completion(&acio->nhi_boot_completion);
 	acio->dev = &pdev->dev;
 	acio->np = dev->of_node;
+	spin_lock_init(&acio->dp_source.lock);
+	apple_dp_source_state_init(&acio->dp_source.desired);
+	apple_dp_source_state_init(&acio->dp_source.applied);
+	INIT_WORK(&acio->dp_source.work, apple_dp_source_work);
+	acio->dp_source.wq = alloc_ordered_workqueue("apple_cio_dp", 0);
+	if (!acio->dp_source.wq)
+		return -ENOMEM;
+	ret = devm_add_action_or_reset(dev, apple_dp_source_destroy, acio);
+	if (ret)
+		return ret;
 
 	acio->sram_res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sram");
 	if (!acio->sram_res)
@@ -911,6 +1074,8 @@ static void apple_cio_remove(struct platform_device *pdev)
 	guard(mutex)(&acio->lock);
 	if (acio->current_cable_info)
 		apple_cio_stop(acio);
+	else
+		flush_workqueue(acio->dp_source.wq);
 }
 
 static const struct of_device_id apple_acio_match[] = {

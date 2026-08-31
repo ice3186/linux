@@ -13,6 +13,11 @@
 
 struct tb_port;
 
+struct tb_dp_source_cookie {
+	u64 session;
+	u64 token;
+};
+
 enum nhi_fw_mode {
 	NHI_FW_SAFE_MODE,
 	NHI_FW_AUTH_MODE,
@@ -93,7 +98,11 @@ struct tb_nhi_ring_layout {
  *
  * The DP tunnel hooks run in sleepable context with the Thunderbolt domain
  * lock held. They must not wait on work that needs that lock. Enable failures
- * are followed by disable/unprepare only for phases that completed.
+ * are followed by disable/unprepare only for phases that completed. Prepare
+ * fills a provider cookie that identifies the reservation; all later phases
+ * receive the same cookie so stale teardown cannot release a newer source.
+ * Providers that implement enable, disable, or unprepare must also implement
+ * prepare.
  */
 struct tb_nhi_ops {
 	int (*init)(struct tb_nhi *nhi);
@@ -112,13 +121,17 @@ struct tb_nhi_ops {
 	bool (*is_present)(struct tb_nhi *nhi);
 	int (*init_interrupts)(struct tb_nhi *nhi);
 	int (*dp_tunnel_prepare)(struct tb_nhi *nhi, struct tb_port *in,
-				 struct tb_port *out);
+				 struct tb_port *out,
+				 struct tb_dp_source_cookie *cookie);
 	int (*dp_tunnel_enable)(struct tb_nhi *nhi, struct tb_port *in,
-				struct tb_port *out);
+				struct tb_port *out,
+				const struct tb_dp_source_cookie *cookie);
 	void (*dp_tunnel_disable)(struct tb_nhi *nhi, struct tb_port *in,
-				  struct tb_port *out);
+				  struct tb_port *out,
+				  const struct tb_dp_source_cookie *cookie);
 	void (*dp_tunnel_unprepare)(struct tb_nhi *nhi, struct tb_port *in,
-				    struct tb_port *out);
+				    struct tb_port *out,
+				    const struct tb_dp_source_cookie *cookie);
 };
 
 /*

@@ -9,6 +9,7 @@ thunderbolt-${CONFIG_ACPI} += acpi.o
 thunderbolt-$(CONFIG_DEBUG_FS) += debugfs.o
 thunderbolt-$(CONFIG_USB4_CONFIGFS) += configfs.o
 thunderbolt-${CONFIG_USB4_KUNIT_TEST} += test.o
+thunderbolt-${CONFIG_USB4_KUNIT_TEST} += apple-dp-source-test.o
 CFLAGS_test.o += $(DISABLE_STRUCTLEAK_PLUGIN)
 
 thunderbolt_dma_test-${CONFIG_USB4_DMA_TEST} += dma_test.o

@@ -1043,7 +1043,8 @@ static int tb_dp_pre_activate(struct tb_tunnel *tunnel)
 
 	if (ops->dp_tunnel_prepare && !tunnel->dp_source_prepared) {
 		ret = ops->dp_tunnel_prepare(tb->nhi, tunnel->src_port,
-					     tunnel->dst_port);
+					     tunnel->dst_port,
+					     &tunnel->dp_source_cookie);
 		if (ret) {
 			if (bw_mode_enabled)
 				usb4_dp_port_set_cm_bandwidth_mode_supported(in, false);
@@ -1070,7 +1071,8 @@ static void tb_dp_post_deactivate(struct tb_tunnel *tunnel)
 	if (tunnel->dp_source_prepared) {
 		if (ops->dp_tunnel_unprepare)
 			ops->dp_tunnel_unprepare(tb->nhi, tunnel->src_port,
-						 tunnel->dst_port);
+						 tunnel->dst_port,
+						 &tunnel->dp_source_cookie);
 		tunnel->dp_source_prepared = false;
 	}
 }
@@ -1200,7 +1202,8 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 			if (ops->dp_tunnel_disable)
 				ops->dp_tunnel_disable(tunnel->tb->nhi,
 						       tunnel->src_port,
-						       tunnel->dst_port);
+						       tunnel->dst_port,
+						       &tunnel->dp_source_cookie);
 			tunnel->dp_source_enabled = false;
 		}
 		tb_dp_port_hpd_clear(tunnel->src_port);
@@ -1223,7 +1226,8 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 	    tunnel->tb->nhi->ops->dp_tunnel_enable) {
 		ret = tunnel->tb->nhi->ops->dp_tunnel_enable(tunnel->tb->nhi,
 							      tunnel->src_port,
-							      tunnel->dst_port);
+							      tunnel->dst_port,
+							      &tunnel->dp_source_cookie);
 		if (ret)
 			return ret;
 		tunnel->dp_source_enabled = true;
