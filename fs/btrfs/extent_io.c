@@ -1540,27 +1540,27 @@ static noinline_for_stack int writepage_fixup(struct btrfs_inode *inode,
 		return 0;
 	}
 	/*
-	 * The folio flag and the subpage bitmap should describe the same state.
-	 * If they do not, failing writeback leaves the folio permanently dirty and
-	 * makes every later sync fail in the same way.  Repair conservatively by
-	 * treating every dirty block as needing fixup.  The worker checks for an
-	 * existing delalloc reservation or ordered extent before reserving space,
-	 * so this is safe for both a stale flag and lost bitmap bits.
+	 * No dirty block selected for this writeback pass needs fixup.  There may
+	 * still be a legitimate fixup bit outside the submit bitmap, in which case
+	 * the folio flag must remain set for a later pass.  Otherwise the flag is
+	 * stale: clear it and let ordinary delalloc/ordered writeback proceed.
+	 *
+	 * In particular, do not manufacture fixup bits here.  Dirty blocks can
+	 * already have delalloc reservations, and deferring those blocks to the
+	 * reservation worker violates the worker's fixup-versus-delalloc invariant.
 	 */
-	btrfs_warn_rl(fs_info,
-		      "root %lld ino %llu folio %llu repairing empty fixup bitmap",
-		      btrfs_root_id(inode->root), btrfs_ino(inode),
-		      folio_pos(folio));
-	for_each_set_bit(bit, bio_ctrl->submit_bitmap, blocks_per_folio) {
+	for (bit = 0; bit < blocks_per_folio; bit++) {
 		const u64 start = page_start + (bit << fs_info->sectorsize_bits);
 
-		btrfs_folio_set_fixup(fs_info, folio, start, sectorsize);
-		bitmap_clear(bio_ctrl->submit_bitmap, bit, 1);
+		if (btrfs_folio_test_fixup(fs_info, folio, start, sectorsize))
+			return 0;
 	}
-	btrfs_queue_writepage_fixup(inode, folio);
-	folio_redirty_for_writepage(bio_ctrl->wbc, folio);
-	folio_unlock(folio);
-	return 1;
+	btrfs_warn_rl(fs_info,
+		      "root %lld ino %llu folio %llu clearing stale fixup flag",
+		      btrfs_root_id(inode->root), btrfs_ino(inode),
+		      folio_pos(folio));
+	folio_clear_fixup_pending(folio);
+	return 0;
 }
 
 /*
