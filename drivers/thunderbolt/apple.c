@@ -185,7 +185,9 @@ static void apple_dp_source_work(struct work_struct *work)
 	struct apple_cio *acio = container_of(work, struct apple_cio, dp_source.work);
 	struct apple_dp_source_state desired;
 	struct apple_dp_source_state applied;
+	struct apple_dp_source_state next;
 	unsigned long flags;
+	bool changed;
 	bool stable;
 
 	/*
@@ -197,18 +199,24 @@ static void apple_dp_source_work(struct work_struct *work)
 		desired = acio->dp_source.desired;
 		applied = acio->dp_source.applied;
 		spin_unlock_irqrestore(&acio->dp_source.lock, flags);
+		next = applied;
+		changed = apple_dp_source_step_toward(&next, &desired);
 
-		dev_info(acio->dev,
-			 "experimental DP source apply %s -> %s generation %llu, session %llu, token %llu, %llx:%u -> %llx:%u (trace only)\n",
-			 apple_dp_source_phase_name(applied.phase),
-			 apple_dp_source_phase_name(desired.phase), desired.generation,
-			 desired.cookie.session, desired.cookie.token,
-			 desired.endpoint.in_route, desired.endpoint.in_port,
-			 desired.endpoint.out_route, desired.endpoint.out_port);
+		if (changed)
+			dev_info(acio->dev,
+				 "experimental DP source apply %s -> %s (target %s) generation %llu, session %llu, token %llu, %llx:%u -> %llx:%u (trace only)\n",
+				 apple_dp_source_phase_name(applied.phase),
+				 apple_dp_source_phase_name(next.phase),
+				 apple_dp_source_phase_name(desired.phase),
+				 next.generation, next.cookie.session,
+				 next.cookie.token, next.endpoint.in_route,
+				 next.endpoint.in_port, next.endpoint.out_route,
+				 next.endpoint.out_port);
 
 		spin_lock_irqsave(&acio->dp_source.lock, flags);
-		acio->dp_source.applied = desired;
-		stable = desired.generation == acio->dp_source.desired.generation;
+		acio->dp_source.applied = next;
+		stable = apple_dp_source_state_equal(&next,
+						     &acio->dp_source.desired);
 		spin_unlock_irqrestore(&acio->dp_source.lock, flags);
 	} while (!stable);
 }

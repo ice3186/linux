@@ -168,6 +168,52 @@ static void apple_dp_source_test_identity_wrap(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, cookie.token, 1ULL);
 }
 
+static void apple_dp_source_test_applied_enable_is_stepwise(struct kunit *test)
+{
+	struct apple_dp_source_cookie cookie;
+	struct apple_dp_source_state desired;
+	struct apple_dp_source_state applied;
+
+	apple_dp_source_state_init(&desired);
+	KUNIT_ASSERT_EQ(test, apple_dp_source_begin_session(&desired), 0);
+	KUNIT_ASSERT_EQ(test,
+			apple_dp_source_prepare(&desired, &endpoint_a, &cookie), 0);
+	KUNIT_ASSERT_EQ(test, apple_dp_source_enable(&desired, &cookie), 0);
+	apple_dp_source_state_init(&applied);
+
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_step_toward(&applied, &desired));
+	KUNIT_EXPECT_EQ(test, applied.phase, APPLE_DP_SOURCE_PREPARED);
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_step_toward(&applied, &desired));
+	KUNIT_EXPECT_EQ(test, applied.phase, APPLE_DP_SOURCE_ENABLED);
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_state_equal(&applied, &desired));
+	KUNIT_EXPECT_FALSE(test, apple_dp_source_step_toward(&applied, &desired));
+}
+
+static void apple_dp_source_test_applied_release_is_stepwise(struct kunit *test)
+{
+	struct apple_dp_source_cookie cookie;
+	struct apple_dp_source_state desired;
+	struct apple_dp_source_state applied;
+
+	apple_dp_source_state_init(&desired);
+	KUNIT_ASSERT_EQ(test, apple_dp_source_begin_session(&desired), 0);
+	KUNIT_ASSERT_EQ(test,
+			apple_dp_source_prepare(&desired, &endpoint_a, &cookie), 0);
+	KUNIT_ASSERT_EQ(test, apple_dp_source_enable(&desired, &cookie), 0);
+	applied = desired;
+	KUNIT_ASSERT_TRUE(test, apple_dp_source_quiesce(&desired));
+
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_step_toward(&applied, &desired));
+	KUNIT_EXPECT_EQ(test, applied.phase, APPLE_DP_SOURCE_PREPARED);
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_cookie_equal(&applied.cookie,
+							    &cookie));
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_step_toward(&applied, &desired));
+	KUNIT_EXPECT_EQ(test, applied.phase, APPLE_DP_SOURCE_IDLE);
+	KUNIT_EXPECT_EQ(test, applied.cookie.token, 0);
+	KUNIT_EXPECT_TRUE(test, apple_dp_source_state_equal(&applied, &desired));
+	KUNIT_EXPECT_FALSE(test, apple_dp_source_step_toward(&applied, &desired));
+}
+
 static struct kunit_case apple_dp_source_test_cases[] = {
 	KUNIT_CASE(apple_dp_source_test_lifecycle),
 	KUNIT_CASE(apple_dp_source_test_conflict_is_unchanged),
@@ -178,6 +224,8 @@ static struct kunit_case apple_dp_source_test_cases[] = {
 	KUNIT_CASE(apple_dp_source_test_session_epoch),
 	KUNIT_CASE(apple_dp_source_test_generation_wrap),
 	KUNIT_CASE(apple_dp_source_test_identity_wrap),
+	KUNIT_CASE(apple_dp_source_test_applied_enable_is_stepwise),
+	KUNIT_CASE(apple_dp_source_test_applied_release_is_stepwise),
 	{}
 };
 

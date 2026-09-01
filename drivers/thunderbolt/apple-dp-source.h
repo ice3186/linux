@@ -40,6 +40,79 @@ apple_dp_source_cookie_equal(const struct apple_dp_source_cookie *a,
 	return a->session == b->session && a->token == b->token;
 }
 
+static inline bool
+apple_dp_source_endpoint_equal(const struct apple_dp_source_endpoint *a,
+			       const struct apple_dp_source_endpoint *b)
+{
+	return a->in_route == b->in_route && a->out_route == b->out_route &&
+	       a->in_port == b->in_port && a->out_port == b->out_port;
+}
+
+static inline bool
+apple_dp_source_state_equal(const struct apple_dp_source_state *a,
+			    const struct apple_dp_source_state *b)
+{
+	return apple_dp_source_endpoint_equal(&a->endpoint, &b->endpoint) &&
+	       apple_dp_source_cookie_equal(&a->cookie, &b->cookie) &&
+	       a->phase == b->phase && a->generation == b->generation &&
+	       a->session == b->session && a->next_token == b->next_token &&
+	       a->quiescing == b->quiescing;
+}
+
+/*
+ * Advance an applied state by one externally observable lifecycle edge.
+ *
+ * A future hardware provider must disable an enabled source before releasing
+ * its reservation. Keeping that ordering in the trace-only reducer prevents
+ * a coalesced ENABLED -> IDLE request from hiding either edge during bring-up.
+ * Identity changes also drain the old source to IDLE before preparing the new
+ * endpoint.
+ */
+static inline bool
+apple_dp_source_step_toward(struct apple_dp_source_state *applied,
+			    const struct apple_dp_source_state *desired)
+{
+	bool identity_changed =
+		!apple_dp_source_endpoint_equal(&applied->endpoint,
+					&desired->endpoint) ||
+		!apple_dp_source_cookie_equal(&applied->cookie, &desired->cookie);
+
+	if (applied->phase != APPLE_DP_SOURCE_IDLE && identity_changed) {
+		if (applied->phase == APPLE_DP_SOURCE_ENABLED) {
+			applied->phase = APPLE_DP_SOURCE_PREPARED;
+		} else {
+			*applied = *desired;
+			applied->phase = APPLE_DP_SOURCE_IDLE;
+			applied->endpoint = (struct apple_dp_source_endpoint) {};
+			applied->cookie = (struct apple_dp_source_cookie) {};
+		}
+		return true;
+	}
+
+	if (applied->phase > desired->phase) {
+		applied->phase--;
+		if (applied->phase == APPLE_DP_SOURCE_IDLE)
+			*applied = *desired;
+		return true;
+	}
+
+	if (applied->phase < desired->phase) {
+		if (applied->phase == APPLE_DP_SOURCE_IDLE) {
+			*applied = *desired;
+			applied->phase = APPLE_DP_SOURCE_PREPARED;
+		} else {
+			applied->phase = APPLE_DP_SOURCE_ENABLED;
+		}
+		return true;
+	}
+
+	if (apple_dp_source_state_equal(applied, desired))
+		return false;
+
+	*applied = *desired;
+	return true;
+}
+
 static inline void apple_dp_source_state_init(struct apple_dp_source_state *state)
 {
 	*state = (struct apple_dp_source_state) {
