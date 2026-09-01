@@ -58,6 +58,11 @@ static bool unstable_edid = true;
 module_param(unstable_edid, bool, 0644);
 MODULE_PARM_DESC(unstable_edid, "Enable unstable EDID retrival support");
 
+static bool experimental_dptx_validate;
+module_param(experimental_dptx_validate, bool, 0444);
+MODULE_PARM_DESC(experimental_dptx_validate,
+		 "Validate the DPTX target before connect (experimental)");
+
 /* copied and simplified from drm_vblank.c */
 static void send_vblank_event(struct drm_device *dev,
 		struct drm_pending_vblank_event *e,
@@ -430,6 +435,20 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	dptx->cleanup_owned = false;
 
 	dptx->atcphy = dcp->phy;
+	if (experimental_dptx_validate) {
+		dev_info(dcp->dev,
+			 "%s: validating target core=0 atc=%u die=%u\n",
+			 __func__, dcp->dptx_phy, dcp->dptx_die);
+		ret = dptxport_validate_connection(dptx->service, 0,
+						   dcp->dptx_phy,
+						   dcp->dptx_die);
+		if (ret) {
+			dev_warn(dcp->dev,
+				 "%s: target validation failed:%d\n",
+				 __func__, ret);
+			goto out_abort;
+		}
+	}
 	ret = dptxport_connect(dptx->service, 0, dcp->dptx_phy,
 			       dcp->dptx_die);
 	if (ret) {
